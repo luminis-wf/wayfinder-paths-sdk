@@ -36,6 +36,7 @@ This repo ships:
 - A project-scoped MCP server config at `.mcp.json` (Claude Code will prompt to enable it).
 - A safety review hook at `.claude/settings.json` that forces confirmation before fund-moving calls.
 - Claude Code skills under `.claude/skills/` for strategy development + adapter exploration.
+- A Packs skill under `.claude/skills/developing-wayfinder-packs/` for `wfpack.yaml` + applets + signals (`/developing-wayfinder-packs`).
 - A local, gitignored runs directory at `.wayfinder_runs/` for one-off “execution mode” scripts.
 
 MCP server entrypoint:
