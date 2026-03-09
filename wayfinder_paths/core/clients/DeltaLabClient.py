@@ -156,6 +156,31 @@ class DeltaLabClient(WayfinderClient):
         response = await self._authed_request("GET", url, params=params)
         return response.json()
 
+    async def search_assets(
+        self,
+        *,
+        query: str,
+        chain_id: int | None = None,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        """
+        Search assets by symbol/name/address/coingecko_id.
+
+        Args:
+            query: Search term
+            chain_id: Optional chain ID filter
+            limit: Max results (default: 25, max: 200)
+
+        Returns:
+            {"assets": [AssetResponse, ...], "total_count": N}
+        """
+        url = f"{get_api_base_url()}/delta-lab/assets/search"
+        params: dict[str, str | int] = {"query": query, "limit": limit}
+        if chain_id is not None:
+            params["chain_id"] = chain_id
+        response = await self._authed_request("GET", url, params=params)
+        return response.json()
+
     async def get_asset_basis(self, *, symbol: str) -> dict[str, Any]:
         """
         Get basis group information for an asset.
@@ -243,7 +268,7 @@ class DeltaLabClient(WayfinderClient):
                 df = pd.DataFrame(records)
                 # Convert ts to datetime and set as index
                 if "ts" in df.columns:
-                    df["ts"] = pd.to_datetime(df["ts"])
+                    df["ts"] = pd.to_datetime(df["ts"], format="ISO8601")
                     df.set_index("ts", inplace=True)
                 result[normalized_key] = df
 
@@ -286,6 +311,194 @@ class DeltaLabClient(WayfinderClient):
         }
         if as_of:
             params["as_of"] = as_of.isoformat()
+        response = await self._authed_request("GET", url, params=params)
+        return response.json()
+
+    async def screen_price(
+        self,
+        *,
+        sort: str = "price_usd",
+        order: str = "desc",
+        limit: int = 100,
+        asset_ids: list[int] | None = None,
+        basis: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Screen assets by price features (returns, volatility, drawdowns).
+
+        Args:
+            sort: Column to sort by (default: "price_usd")
+            order: "asc" or "desc" (default: "desc")
+            limit: Max rows, 1-1000 (default: 100)
+            asset_ids: Filter to specific asset IDs
+            basis: Basis symbol to filter by (e.g. "ETH") — overrides asset_ids
+
+        Returns:
+            ScreenResponse: {"data": [ScreenPriceRow, ...], "count": N}
+        """
+        url = f"{get_api_base_url()}/delta-lab/screen/price"
+        params: dict[str, str | int] = {
+            "sort": sort,
+            "order": order,
+            "limit": limit,
+        }
+        if basis:
+            params["basis"] = basis
+        elif asset_ids:
+            params["asset_ids"] = ",".join(str(a) for a in asset_ids)
+        response = await self._authed_request("GET", url, params=params)
+        return response.json()
+
+    async def screen_lending(
+        self,
+        *,
+        sort: str = "net_supply_apr_now",
+        order: str = "desc",
+        limit: int = 100,
+        asset_ids: list[int] | None = None,
+        basis: str | None = None,
+        venue: str | None = None,
+        min_tvl: float | None = None,
+        exclude_frozen: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Screen lending markets by surface features (supply/borrow APRs, TVL, utilization).
+
+        Args:
+            sort: Column to sort by (default: "net_supply_apr_now")
+            order: "asc" or "desc" (default: "desc")
+            limit: Max rows, 1-1000 (default: 100)
+            asset_ids: Filter to specific asset IDs
+            basis: Basis symbol to filter by (e.g. "ETH") — overrides asset_ids
+            venue: Filter by venue name (e.g. "aave", "morpho")
+            min_tvl: Minimum supply TVL in USD
+            exclude_frozen: Exclude frozen and paused markets (default: False)
+
+        Returns:
+            ScreenResponse: {"data": [ScreenLendingRow, ...], "count": N}
+        """
+        url = f"{get_api_base_url()}/delta-lab/screen/lending"
+        params: dict[str, str | int] = {
+            "sort": sort,
+            "order": order,
+            "limit": limit,
+        }
+        if basis:
+            params["basis"] = basis
+        elif asset_ids:
+            params["asset_ids"] = ",".join(str(a) for a in asset_ids)
+        if venue:
+            params["venue"] = venue
+        if min_tvl is not None:
+            params["min_tvl"] = min_tvl
+        if exclude_frozen:
+            params["exclude_frozen"] = "true"
+        response = await self._authed_request("GET", url, params=params)
+        return response.json()
+
+    async def screen_perp(
+        self,
+        *,
+        sort: str = "funding_now",
+        order: str = "desc",
+        limit: int = 100,
+        asset_ids: list[int] | None = None,
+        basis: str | None = None,
+        venue: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Screen perpetual markets by surface features (funding, basis, OI, volume).
+
+        Args:
+            sort: Column to sort by (default: "funding_now")
+            order: "asc" or "desc" (default: "desc")
+            limit: Max rows, 1-1000 (default: 100)
+            asset_ids: Filter to specific base asset IDs
+            basis: Basis symbol to filter by (e.g. "ETH") — overrides asset_ids
+            venue: Filter by venue name (e.g. "hyperliquid", "binance")
+
+        Returns:
+            ScreenResponse: {"data": [ScreenPerpRow, ...], "count": N}
+        """
+        url = f"{get_api_base_url()}/delta-lab/screen/perp"
+        params: dict[str, str | int] = {
+            "sort": sort,
+            "order": order,
+            "limit": limit,
+        }
+        if basis:
+            params["basis"] = basis
+        elif asset_ids:
+            params["asset_ids"] = ",".join(str(a) for a in asset_ids)
+        if venue:
+            params["venue"] = venue
+        response = await self._authed_request("GET", url, params=params)
+        return response.json()
+
+    async def screen_borrow_routes(
+        self,
+        *,
+        sort: str = "ltv_max",
+        order: str = "desc",
+        limit: int = 100,
+        asset_ids: list[int] | None = None,
+        basis: str | None = None,
+        borrow_asset_ids: list[int] | None = None,
+        borrow_basis: str | None = None,
+        venue: str | None = None,
+        chain_id: int | None = None,
+        market_id: int | None = None,
+        topology: str | None = None,
+        mode_type: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Screen lending borrow routes (collateral → borrow).
+
+        Args:
+            sort: Column to sort by (default: "ltv_max")
+            order: "asc" or "desc" (default: "desc")
+            limit: Max rows, 1-1000 (default: 100)
+            asset_ids: Filter to specific collateral asset IDs
+            basis: Collateral basis symbol (e.g. "ETH") — overrides asset_ids
+            borrow_asset_ids: Filter to specific borrow asset IDs
+            borrow_basis: Borrow basis symbol (e.g. "USD") — overrides borrow_asset_ids
+            venue: Filter by venue name
+            chain_id: Filter by chain ID
+            market_id: Filter by market ID
+            topology: Filter by route topology (e.g. "POOLED", "ISOLATED_PAIR")
+            mode_type: Filter by route mode type (e.g. "BASE", "EMODE", "ISOLATION")
+
+        Returns:
+            ScreenResponse: {"data": [ScreenBorrowRouteRow, ...], "count": N}
+        """
+        url = f"{get_api_base_url()}/delta-lab/screen/borrow-routes"
+        params: dict[str, str | int] = {
+            "sort": sort,
+            "order": order,
+            "limit": limit,
+        }
+
+        if basis:
+            params["basis"] = basis
+        elif asset_ids:
+            params["asset_ids"] = ",".join(str(a) for a in asset_ids)
+
+        if borrow_basis:
+            params["borrow_basis"] = borrow_basis
+        elif borrow_asset_ids:
+            params["borrow_asset_ids"] = ",".join(str(a) for a in borrow_asset_ids)
+
+        if venue:
+            params["venue"] = venue
+        if chain_id is not None:
+            params["chain_id"] = chain_id
+        if market_id is not None:
+            params["market_id"] = market_id
+        if topology:
+            params["topology"] = topology
+        if mode_type:
+            params["mode_type"] = mode_type
+
         response = await self._authed_request("GET", url, params=params)
         return response.json()
 

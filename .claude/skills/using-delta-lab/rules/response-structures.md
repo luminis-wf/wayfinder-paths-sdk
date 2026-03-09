@@ -22,12 +22,12 @@ The core data structure representing a yield opportunity.
 ```python
 {
     "instrument_id": 123,
-    "instrument_type": "perp",  # perp, spot, lending, fixed_rate, pt, yt
-    "side": "LONG",  # LONG (receive yield) or SHORT (pay yield)
+    "instrument_type": "PERP",  # PERP, LENDING_SUPPLY, LENDING_BORROW, BOROS_MARKET, PENDLE_PT, YIELD_TOKEN
+    "side": "LONG",  # LONG or SHORT (position direction; semantics depend on instrument_type)
     "venue": "hyperliquid",  # Protocol/venue name
     "market_id": 456,
     "market_external_id": "BTC-USD",
-    "market_type": "perpetual",
+    "market_type": "PERP",
     "chain_id": 999,  # For on-chain opportunities
     "maturity_ts": "2024-12-31T00:00:00Z",  # For fixed-term instruments
 
@@ -64,10 +64,11 @@ The core data structure representing a yield opportunity.
         "vol_annualized": 0.5,
         "erisk_proxy": 0.05,
         "tvl_usd": 1000000,
+        "size_usd": 2000000,
         "liquidity_usd": 500000,
-        "duration_risk": 0.1,
-        "liquidity_penalty": 0.02
-    }
+    },
+    "quality_ok": 1,
+    "market_label": "BTC-USD"
 }
 ```
 
@@ -75,17 +76,23 @@ The core data structure representing a yield opportunity.
 
 #### `instrument_type`
 
-- `perp` - Perpetual futures (funding rate opportunities)
-- `spot` - Spot holdings (no yield unless staked/lent)
-- `lending` - Lending/borrowing positions
-- `fixed_rate` - Fixed-rate markets (Boros)
-- `pt` - Principal tokens (Pendle)
-- `yt` - Yield tokens (Pendle)
+Delta Lab uses uppercase enums (exact strings in the API response):
+
+- `PERP` - Perpetual futures (funding rate opportunities)
+- `LENDING_SUPPLY` - Supply-side lending (you receive yield)
+- `LENDING_BORROW` - Borrow-side lending (you pay a cost; APY is often negative)
+- `BOROS_MARKET` - Boros fixed-rate markets (`fixed_rate_mark`)
+- `PENDLE_PT` - Pendle PT markets (`implied_apy`, `underlying_apy`)
+- `YIELD_TOKEN` - Yield-bearing token yields (`underlying_apy`, `reward_apr`)
 
 #### `side`
 
-- `LONG` - You receive yield (lending, short perp in positive funding, holding PT)
-- `SHORT` - You pay yield (borrowing, long perp in positive funding, holding YT)
+- `LONG` - Take the long side of the instrument (e.g. supply/lend, long perp, receive fixed-rate)
+- `SHORT` - Take the short side of the instrument (e.g. borrow, short perp, pay fixed-rate)
+
+For most instruments, `apy.value` is already signed as the *net yield* for that position:
+- Positive `apy.value` → the position receives yield
+- Negative `apy.value` → the position pays yield (cost)
 
 #### Asset References
 
@@ -104,7 +111,7 @@ Detailed breakdown of APY sources (all fields are optional).
 
 ```python
 "components": {
-    # Perpetual funding (ALL VALUES ARE DECIMALS: 0.01 = 1%)
+    # PERP (funding) (ALL VALUES ARE DECIMALS: 0.01 = 1%)
     "funding_rate_hourly_avg": 0.00001,  # 0.001% per hour
     "funding_apy_est": 0.0876,  # 8.76% annualized
     "funding_rate_hourly_latest": 0.000012,  # 0.0012% per hour
@@ -112,42 +119,49 @@ Detailed breakdown of APY sources (all fields are optional).
     "oi_usd": 1000000000,  # Open interest in USD
     "volume_usd": 500000000,  # 24h volume in USD
 
-    # Fixed-rate markets (Boros)
-    "implied_apy": 0.12,  # 12% APY
+    # PENDLE_PT
+    "implied_apy": 0.12,  # 12% implied APY
+    "underlying_apy": 0.04,  # 4% underlying/reference APY
+
+    # BOROS_MARKET (fixed-rate)
+    "fixed_rate_mark": 0.10,  # 10% fixed rate quote
 
     # Lending markets
     "supply_apr": 0.05,  # 5% APR
     "supply_reward_apr": 0.02,  # 2% APR from rewards
+    "protocol_supply_apr": 0.07,  # supply_apr + supply_reward_apr
     "borrow_apr": 0.08,  # 8% APR cost
     "borrow_reward_apr": 0.01,  # 1% APR rewards offset
+    "protocol_borrow_apr": 0.07,  # borrow_apr - borrow_reward_apr
+    "base_yield_apy": 0.03,  # deposit token intrinsic yield (e.g., wstETH)
 
-    # Pendle PT/YT
-    "underlying_apy": 0.04,  # 4% underlying yield
-    "reward_apr": 0.03,  # 3% additional rewards
+    # YIELD_TOKEN
+    "reward_apr": 0.03,  # additional rewards
+    "apy_base": 0.06,  # base yield APY
+    "apy_base_7d": 0.055,  # 7-day mean base yield
 
-    # Pool APY
-    "apy_base": 0.06,  # 6% base APY
-    "apy_base_7d": 0.055,  # 5.5% 7-day average
-
-    # Fixed-rate
-    "fixed_rate_mark": 0.10  # 10% fixed rate
+    # NOTE: Each opportunity populates only a subset of component fields.
 }
 ```
 
 ### Component Interpretation
 
-For **perp funding**:
-- Positive `funding_apy_est` = longs pay shorts
-- Negative `funding_apy_est` = shorts pay longs
-- Check `side` to determine if you receive or pay
+For **perp funding (`PERP`)**:
+- Hyperliquid: positive funding = longs pay shorts
+- For `side="SHORT"` (short perp hedge), positive `funding_apy_est` is yield; negative is a cost
+- For `side="LONG"` (long perp), the interpretation flips
 
-For **lending**:
-- LONG side → `supply_apr` + `supply_reward_apr`
-- SHORT side → `borrow_apr` - `borrow_reward_apr` (you pay this)
+For **lending (`LENDING_SUPPLY` / `LENDING_BORROW`)**:
+- Supply (`LENDING_SUPPLY`) → `protocol_supply_apr = supply_apr + supply_reward_apr`
+- Borrow (`LENDING_BORROW`) → `protocol_borrow_apr = borrow_apr - borrow_reward_apr`
+- If `base_yield_apy` (or `underlying_apy`) exists, `apy.value` reflects compounding:
+  `(1 + protocol_rate) * (1 + underlying_yield) - 1`
 
-For **fixed-rate**:
-- `implied_apy` is what you lock in
-- Compare to `funding_apy_est` (floating) for arbitrage
+For **Pendle PT (`PENDLE_PT`)**:
+- `implied_apy` is the rate you lock in (best-effort)
+
+For **Boros (`BOROS_MARKET`)**:
+- `fixed_rate_mark` is the fixed rate quote
 
 ## Risk Metrics
 
@@ -156,19 +170,17 @@ For **fixed-rate**:
     "vol_annualized": 0.5,  # Annualized volatility (0.5 = 50%)
     "erisk_proxy": 0.05,  # Estimated risk proxy (lower is better)
     "tvl_usd": 1000000,  # Total value locked in protocol/market
+    "size_usd": 2000000,  # Capacity proxy (used as secondary sort / quality checks)
     "liquidity_usd": 500000,  # Available liquidity
-    "duration_risk": 0.1,  # Duration risk (for fixed-term)
-    "liquidity_penalty": 0.02  # Penalty for low liquidity
 }
 ```
 
 ### Risk Interpretation
 
 - `erisk_proxy` - Lower is better. Combines vol, liquidity, and other factors
-- `tvl_usd` - Higher TVL generally means more established/safe
-- `liquidity_usd` - Higher liquidity means easier entry/exit
-- `duration_risk` - Relevant for fixed-term instruments (time to maturity)
-- `liquidity_penalty` - Adjustment to APY for liquidity risk
+- `tvl_usd` - Higher TVL generally means more established/safe (when populated)
+- `size_usd` - Per-instrument capacity proxy used in quality filters/sorting
+- `liquidity_usd` - Higher liquidity means easier entry/exit (when populated)
 
 ## Delta-Neutral Candidate
 
@@ -180,8 +192,8 @@ A matched carry/hedge pair.
     "exposure_asset": {"asset_id": 1, "symbol": "BTC"},
 
     "carry_leg": {
-        # Full Opportunity object (LONG side - you receive yield)
-        "instrument_type": "lending",
+        # Full Opportunity object (carry leg, typically side="LONG")
+        "instrument_type": "LENDING_SUPPLY",
         "side": "LONG",
         "venue": "moonwell",
         "apy": {"value": 0.08, ...},  # 8% APY (decimal format)
@@ -189,15 +201,15 @@ A matched carry/hedge pair.
     },
 
     "hedge_leg": {
-        # Full Opportunity object (SHORT side - hedges exposure)
-        "instrument_type": "perp",
+        # Full Opportunity object (hedge leg, typically a short perp)
+        "instrument_type": "PERP",
         "side": "SHORT",
         "venue": "hyperliquid",
         "apy": {"value": -0.03, ...},  # -3% APY cost (funding you pay)
         ...
     },
 
-    "net_apy": 0.05,  # 5% net yield (0.08 - 0.03 = 0.05 = 5%)
+    "net_apy": 0.05,  # 5% net yield (0.08 + (-0.03) = 0.05 = 5%)
     "erisk_proxy": 0.05  # Combined risk metric
 }
 ```
@@ -214,58 +226,41 @@ Note: The hedge_leg APY is already signed correctly:
 
 ### Example Pairs
 
-**Long spot + short perp (cash-and-carry):**
+**Supply + short perp (classic carry + hedge):**
 ```python
 {
     "carry_leg": {
-        "instrument_type": "spot",
-        "side": "LONG",
-        "apy": {"value": 0.0}  # 0% - no yield from holding spot
-    },
-    "hedge_leg": {
-        "instrument_type": "perp",
-        "side": "SHORT",
-        "apy": {"value": 0.12}  # 12% - receiving positive funding as short
-    },
-    "net_apy": 0.12  # 12% net from funding received
-}
-```
-
-**Lend + short perp:**
-```python
-{
-    "carry_leg": {
-        "instrument_type": "lending",
+        "instrument_type": "LENDING_SUPPLY",
         "side": "LONG",
         "venue": "moonwell",
-        "apy": {"value": 0.08}  # 8% lending APY
+        "apy": {"value": 0.08}  # 8% supply APY
     },
     "hedge_leg": {
-        "instrument_type": "perp",
+        "instrument_type": "PERP",
         "side": "SHORT",
         "venue": "hyperliquid",
-        "apy": {"value": 0.12}  # 12% funding received
+        "apy": {"value": -0.03}  # -3% funding cost for shorts
     },
-    "net_apy": 0.20  # 20% combined (8% + 12%)
+    "net_apy": 0.05  # 5% net
 }
 ```
 
-**Lend + long fixed rate (lock in yield):**
+**Fixed-rate receive + short perp:**
 ```python
 {
     "carry_leg": {
-        "instrument_type": "lending",
-        "side": "LONG",
-        "venue": "moonwell",
-        "apy": {"value": 0.08}  # 8% floating lending rate
-    },
-    "hedge_leg": {
-        "instrument_type": "fixed_rate",
+        "instrument_type": "BOROS_MARKET",
         "side": "LONG",
         "venue": "boros",
-        "apy": {"value": -0.05}  # -5% fixed rate cost to lock in
+        "apy": {"value": 0.10}  # 10% fixed rate
     },
-    "net_apy": 0.03  # 3% locked-in spread (8% - 5%)
+    "hedge_leg": {
+        "instrument_type": "PERP",
+        "side": "SHORT",
+        "venue": "hyperliquid",
+        "apy": {"value": 0.12}  # 12% funding received by shorts
+    },
+    "net_apy": 0.22  # 22% combined (10% + 12%)
 }
 ```
 
@@ -295,11 +290,12 @@ High-level statistics about the results.
 ```python
 {
     "instrument_type_counts": {
-        "perp": 15,
-        "lending": 8,
-        "fixed_rate": 3,
-        "pt": 2,
-        "yt": 1
+        "PERP": 15,
+        "LENDING_SUPPLY": 8,
+        "LENDING_BORROW": 4,
+        "BOROS_MARKET": 3,
+        "PENDLE_PT": 2,
+        "YIELD_TOKEN": 1
     }
 }
 ```
@@ -407,15 +403,26 @@ If the asset is not in a basis group, `"basis"` will be `None`:
     "lending": DataFrame(
         columns=[
             "market_id",
+            "asset_symbol",
             "chain_id",
             "venue",
             "supply_apr",
             "borrow_apr",
             "supply_reward_apr",
             "borrow_reward_apr",
+            "net_supply_apy",
+            "net_borrow_apy",
+            "avg_supply_apy",
+            "avg_borrow_apy",
             "utilization",
             "supply_tvl_usd",
-            "borrow_tvl_usd"
+            "borrow_tvl_usd",
+            "collateral_tvl_usd",
+            "fee",
+            "rewards_estimated",
+            "base_yield_apy",
+            "underlying_apy",
+            "combined_supply_apy",
         ],
         index=DatetimeIndex
     ),
@@ -478,8 +485,11 @@ If the asset is not in a basis group, `"basis"` will be `None`:
 - Multiple markets per timestamp (different venues/chains)
 - `supply_apr` / `borrow_apr` - Base rates
 - `supply_reward_apr` / `borrow_reward_apr` - Additional rewards
+- `net_supply_apy` / `net_borrow_apy` - Net rates (when populated)
 - `utilization` - Market utilization ratio
 - `supply_tvl_usd` / `borrow_tvl_usd` - Market sizes
+- `base_yield_apy` / `underlying_apy` - Token intrinsic yield (if the lending asset is yield-bearing)
+- `combined_supply_apy` - Compounded supply yield when intrinsic yield exists
 
 #### Funding Series
 - Perpetual funding rates over time
@@ -520,4 +530,189 @@ hl_funding = funding_df[funding_df["venue"] == "hyperliquid"]
 
 # Resample to daily average
 daily_avg = funding_df.resample("1D")["funding_rate"].mean()
+```
+
+## Screening Responses
+
+All screening endpoints return `ScreenResponse`:
+
+```python
+{
+    "data": [...],  # List of feature rows
+    "count": 20     # Number of rows returned
+}
+```
+
+### ScreenPriceRow
+
+```python
+{
+    "asof_ts": "2025-02-27T12:00:00Z",
+    "asset_id": 1,
+    "symbol": "BTC",
+    "price_usd": 95000.0,
+    "ret_1d": 0.02,        # 1-day return (decimal: 0.02 = 2%)
+    "ret_7d": 0.05,
+    "ret_30d": 0.15,
+    "ret_90d": 0.40,
+    "vol_7d": 0.35,         # Annualized volatility (decimal)
+    "vol_30d": 0.45,
+    "vol_90d": 0.50,
+    "mdd_30d": -0.12,       # Max drawdown (negative: -0.12 = -12%)
+    "mdd_90d": -0.20
+}
+```
+
+### ScreenLendingRow
+
+```python
+{
+    "asof_ts": "2025-02-27T12:00:00Z",
+    "market_id": 42,
+    "market_type": "MORPHO",
+    "chain_id": 8453,
+    "market_external_id": "0x...",
+    "market_label": "WETH/USDC (80% LLTV)",
+    "asset_id": 3,
+    "symbol": "USDC",
+    "venue_id": 7,
+    "venue_name": "morpho",
+    "is_collateral_enabled": True,
+    "is_frozen": False,
+    "is_paused": False,
+    "base_yield_apy": 0.03,
+    "underlying_apy": 0.03,
+    "net_supply_apr_now": 0.045,       # Current net supply APR (decimal)
+    "net_supply_mean_7d": 0.042,
+    "net_supply_mean_30d": 0.038,
+    "net_supply_std_30d": 0.005,
+    "net_supply_z_30d": 1.4,           # Z-score vs 30d mean
+    "combined_net_supply_apr_now": 0.06, # Including reward APR
+    "combined_supply_mean_7d": 0.055,
+    "combined_supply_mean_30d": 0.050,
+    "combined_supply_std_30d": 0.008,
+    "combined_supply_z_30d": 1.25,
+    "net_borrow_apr_now": 0.065,
+    "net_borrow_mean_7d": 0.060,
+    "net_borrow_mean_30d": 0.058,
+    "net_borrow_std_30d": 0.004,
+    "net_borrow_z_30d": 1.75,
+    "util_now": 0.82,                  # Utilization ratio
+    "util_mean_30d": 0.78,
+    "util_z_30d": 0.8,
+    "liquidity_usd": 50000000.0,
+    "supply_tvl_usd": 200000000.0,
+    "borrow_tvl_usd": 164000000.0,
+    "ltv_max": 0.80,
+    "liq_threshold": 0.825,
+    "liquidation_penalty": 0.05,
+    "borrow_spike_score": 2.1          # Anomaly detection score
+}
+```
+
+### ScreenPerpRow
+
+```python
+{
+    "asof_ts": "2025-02-27T12:00:00Z",
+    "instrument_id": 10,
+    "market_id": 15,
+    "venue_id": 3,
+    "venue_name": "hyperliquid",
+    "base_asset_id": 1,
+    "base_symbol": "BTC",
+    "quote_asset_id": 2,
+    "quote_symbol": "USDT",
+    "mark_price": 95000.0,
+    "index_price": 94980.0,
+    "basis_now": 0.0002,               # Current basis (decimal)
+    "funding_now": 0.00005,            # Current funding rate
+    "funding_mean_7d": 0.00004,
+    "funding_std_7d": 0.00002,
+    "funding_mean_30d": 0.00003,
+    "funding_std_30d": 0.000015,
+    "funding_mean_90d": 0.000035,
+    "funding_std_90d": 0.00002,
+    "funding_z_30d": 1.0,              # Z-score vs 30d mean
+    "funding_z_90d": 0.75,
+    "funding_pos_pct_30d": 0.85,       # % of time positive in 30d
+    "funding_neg_pct_30d": 0.15,
+    "basis_mean_7d": 0.00018,
+    "basis_mean_30d": 0.00015,
+    "basis_std_30d": 0.0001,
+    "basis_z_30d": 0.5,
+    "oi_now": 500000000.0,             # Open interest (USD)
+    "oi_mean_7d": 480000000.0,
+    "oi_change_vs_7d_mean": 0.04,      # OI change vs 7d mean (decimal)
+    "volume_24h": 2000000000.0
+}
+```
+
+### ScreenBorrowRouteRow
+
+From `DELTA_LAB_CLIENT.screen_borrow_routes(...)` or MCP:
+- `wayfinder://delta-lab/screen/borrow-routes/{sort}/{limit}/{basis}/{borrow_basis}`
+- `wayfinder://delta-lab/screen/borrow-routes/{sort}/{limit}/{basis}/{borrow_basis}/{chain_id}`
+
+```python
+{
+    "route_id": 1,
+    "market_id": 123,
+    "market_type": "MORPHO",
+    "chain_id": 8453,
+    "market_external_id": "0x...",
+    "market_label": "WETH/USDC (80% LLTV)",
+    "venue_id": 7,
+    "venue_name": "morpho",
+    "collateral_asset_id": 2,
+    "collateral_symbol": "WETH",
+    "borrow_asset_id": 3,
+    "borrow_symbol": "USDC",
+    "topology": "POOLED",
+    "mode_type": "BASE",
+    "mode_label": None,
+    "ltv_max": 0.8,
+    "liq_threshold": 0.85,
+    "liquidation_penalty": 0.05,
+    "debt_ceiling_usd": 1000000,
+    "collateral_earns_pool_supply": True,
+    "extra": {},
+    "created_at": "2026-03-04T12:34:56+00:00"
+}
+```
+
+Notes:
+- `ltv_max`, `liq_threshold`, and `liquidation_penalty` are fractions (0.8 = 80%).
+- Some fields can be `null` depending on venue/market metadata.
+
+## AssetResponse
+
+From `DELTA_LAB_CLIENT.get_asset(...)` or MCP:
+- `wayfinder://delta-lab/assets/{asset_id}`
+
+```python
+{
+    "asset_id": 1,
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "chain_id": 8453,
+    "address": "0x...",
+    "coingecko_id": "usd-coin"
+}
+```
+
+## AssetSearchResponse
+
+From MCP:
+- `wayfinder://delta-lab/assets/search/{query}`
+- `wayfinder://delta-lab/assets/search/{chain}/{query}`
+- `wayfinder://delta-lab/assets/search/{chain}/{query}/{limit}`
+- `wayfinder://delta-lab/assets/by-address/{address}/{chain_id}`
+
+```python
+{
+    "assets": [AssetResponse, ...],
+    "total_count": 3
+}
 ```
