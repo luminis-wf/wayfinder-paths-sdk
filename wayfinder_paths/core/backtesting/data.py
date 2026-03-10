@@ -358,6 +358,141 @@ async def align_dataframes(
     return tuple(aligned)
 
 
+async def fetch_supply_rates(
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    protocol: str | None = None,
+) -> pd.DataFrame:
+    """
+    Fetch lending protocol supply (deposit) rates.
+
+    Parallel to fetch_borrow_rates() — returns APR averaged across venues per symbol.
+    For per-venue breakdown (needed for rotation/carry strategies), use fetch_lending_rates().
+
+    Args:
+        symbols: List of asset symbols (e.g., ["USDC", "ETH"])
+        start_date: Start date (ISO format: "2025-08-01")
+        end_date: End date (ISO format: "2026-01-01")
+        protocol: Protocol filter ("aave", "morpho", "moonwell", or None for all)
+
+    Returns:
+        DataFrame with index=timestamps, columns=symbols, values=supply_apr (decimal APR)
+
+    Example:
+        >>> rates = await fetch_supply_rates(["USDC"], "2025-08-01", "2026-01-01")
+        >>> prices = (1 + rates / 365).cumprod()  # Build synthetic yield index
+    """
+    valid, error = validate_date_range(start_date, end_date)
+    if not valid:
+        raise ValueError(error)
+
+    start = datetime.fromisoformat(start_date)
+    end = datetime.fromisoformat(end_date)
+    lookback_days = (end - start).days
+
+    all_rates = []
+
+    for symbol in symbols:
+        data = await DELTA_LAB_CLIENT.get_asset_timeseries(
+            symbol=symbol,
+            lookback_days=lookback_days,
+            limit=10000,
+            as_of=end,
+            series="lending",
+        )
+
+        if "lending" in data:
+            lending_df = data["lending"]
+            if not lending_df.empty:
+                if protocol:
+                    lending_df = lending_df[lending_df["venue"] == protocol]
+                if "supply_apr" in lending_df.columns:
+                    grouped = lending_df.groupby(lending_df.index)["supply_apr"].mean()
+                    all_rates.append(grouped.rename(symbol))
+
+    if not all_rates:
+        raise ValueError("No supply rate data found")
+
+    result = pd.concat(all_rates, axis=1)
+    result.index = pd.to_datetime(result.index)
+    return result.sort_index()
+
+
+async def fetch_lending_rates(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    venues: list[str] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Fetch supply and borrow rates broken down by venue for a single asset.
+
+    Use this for multi-venue strategies (rotation, carry trade) where you need
+    to compare rates across protocols. For a simple averaged rate, use
+    fetch_supply_rates() / fetch_borrow_rates() instead.
+
+    Args:
+        symbol: Asset symbol (e.g., "USDC", "ETH")
+        start_date: Start date (ISO format: "2025-08-01")
+        end_date: End date (ISO format: "2026-01-01")
+        venues: Venue filter (e.g., ["aave", "moonwell", "morpho"]), or None for all
+
+    Returns:
+        Dict with keys "supply" and "borrow", each a DataFrame:
+        - index: timestamps
+        - columns: venue names
+        - values: APR as decimal (0.05 = 5% annually)
+
+    Example:
+        >>> rates = await fetch_lending_rates("USDC", "2025-08-01", "2026-01-01",
+        ...                                   venues=["aave", "moonwell", "morpho"])
+        >>> supply = rates["supply"]  # DataFrame[timestamp × venue]
+        >>> borrow = rates["borrow"]  # DataFrame[timestamp × venue]
+        >>> spread = supply.max(axis=1) - borrow.min(axis=1)  # Best carry spread
+    """
+    valid, error = validate_date_range(start_date, end_date)
+    if not valid:
+        raise ValueError(error)
+
+    start = datetime.fromisoformat(start_date)
+    end = datetime.fromisoformat(end_date)
+    lookback_days = (end - start).days
+
+    data = await DELTA_LAB_CLIENT.get_asset_timeseries(
+        symbol=symbol,
+        lookback_days=lookback_days,
+        limit=10000,
+        as_of=end,
+        series="lending",
+    )
+
+    if "lending" not in data or data["lending"].empty:
+        raise ValueError(f"No lending data found for {symbol}")
+
+    lending_df = data["lending"]
+    if venues:
+        lending_df = lending_df[lending_df["venue"].isin(venues)]
+
+    supply = lending_df.pivot_table(
+        index=lending_df.index, columns="venue", values="supply_apr", aggfunc="mean"
+    )
+    borrow = lending_df.pivot_table(
+        index=lending_df.index, columns="venue", values="borrow_apr", aggfunc="mean"
+    )
+
+    supply.index = pd.to_datetime(supply.index)
+    borrow.index = pd.to_datetime(borrow.index)
+    supply = supply.sort_index().ffill()
+    borrow = borrow.sort_index().ffill()
+
+    # Strip column axis name (pivot_table sets columns.name="venue") for cleaner access
+    supply.columns.name = None
+    borrow.columns.name = None
+
+    return {"supply": supply, "borrow": borrow}
+
+
 def convert_to_spot(prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Convert price data to spot representation with zero funding rates.

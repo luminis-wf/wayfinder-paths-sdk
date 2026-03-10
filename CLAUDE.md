@@ -50,6 +50,8 @@ Simulation / scenario testing (vnet only):
 
 Safety defaults:
 
+- **Quote before swap (MANDATORY):** Before calling `mcp__wayfinder__execute(kind="swap")`, always call `mcp__wayfinder__quote_swap` first. Verify the resolved `from_token` and `to_token` (symbol, address, chain) match intent, then show the user the route, estimated output, and fee. Only proceed to `execute` after the user confirms — unless the user has explicitly said to skip quoting (e.g. "just do it", "skip the quote").
+- **Route planning for non-trivial swaps:** Before quoting, assess whether a direct route is likely to exist between the two tokens. If the pair is illiquid, cross-chain, or involves a long-tail token, reason through candidate intermediate hops first (e.g. tokenA → USDC → tokenB, or tokenA → native gas token → tokenB). Quote the most promising paths and compare outputs before presenting to the user. Skip this planning step only for well-known liquid pairs on the same chain (e.g. ETH → USDC on Arbitrum).
 - On-chain writes: use MCP `execute(...)` (swap/send). The hook shows a human-readable preview and asks for confirmation.
 - Arbitrary EVM contract interactions: use MCP `contract_call(...)` (read-only) and `contract_execute(...)` (writes, gated by a review prompt).
   - ABI handling: pass a minimal `abi`/`abi_path` when you can. If omitted, the tools fall back to fetching the ABI from Etherscan V2 (requires `system.etherscan_api_key` or `ETHERSCAN_API_KEY`, and the contract must be verified). If the target is a proxy, tools attempt to resolve the implementation address and fetch the implementation ABI.
@@ -97,85 +99,89 @@ Skills contain rules for correct method usage, common gotchas, and high-value re
 
 ## Backtesting Framework
 
-Use the backtesting framework to **validate strategy ideas before production deployment**. The framework provides:
+Use the backtesting framework to **validate strategy ideas before production deployment**. The framework supports perp/spot momentum, delta-neutral basis carry, lending yield rotation, carry trade, LP strategies, and more.
 
-- Automatic data fetching from Delta Lab and Hyperliquid
-- Realistic transaction costs (fees, slippage, funding)
-- Comprehensive performance metrics (Sharpe, max drawdown, etc.)
-- Liquidation simulation
-- Multi-leverage testing
+**CRITICAL: Data oldest available ~August 2025** (Delta Lab + Hyperliquid retain ~7 months).
 
-**Load `/backtest-strategy` skill** before using the framework for full documentation.
+**Load `/backtest-strategy` skill** before using the framework for full documentation and all strategy patterns.
 
-### Quick Start
+### Strategy type → helper
 
 ```python
-from wayfinder_paths.core.backtesting import quick_backtest
+from wayfinder_paths.core.backtesting import (
+    quick_backtest,           # Perp/spot momentum (auto data fetch + funding)
+    backtest_delta_neutral,   # Long spot + short perp, harvest funding
+    backtest_yield_rotation,  # Rotate across lending venues by supply APR
+    backtest_carry_trade,     # Borrow cheap + supply expensive (net carry)
+    backtest_lp_position,     # 50/50 AMM LP (fee income vs impermanent loss)
+    run_backtest,             # Full control
+)
+```
 
+### Quick Start (momentum)
+
+```python
 def my_strategy(prices, ctx):
-    """Define your signal logic."""
-    returns = prices.pct_change(24)  # 24-period momentum
+    returns = prices.pct_change(24)
     ranks = returns.rank(axis=1, pct=True)
     target = (ranks > 0.5).astype(float) - (ranks < 0.5).astype(float)
     return target / target.abs().sum(axis=1).fillna(1)
 
-# Run backtest with automatic data fetching
 result = await quick_backtest(
     strategy_fn=my_strategy,
     symbols=["BTC", "ETH"],
-    start_date="2025-01-01",
-    end_date="2025-02-01",
+    start_date="2025-08-01",   # Oldest available: ~Aug 2025
+    end_date="2026-01-01",
     leverage=2.0
 )
-
-print(result.stats)  # Sharpe, max_drawdown, CAGR, etc.
+print(f"Sharpe: {result.stats['sharpe']:.2f}")
+print(f"Return: {result.stats['total_return']:.2%}")
 ```
 
-### Manual Workflow (Full Control)
+### Quick Start (yield rotation)
 
 ```python
-from wayfinder_paths.core.backtesting import (
-    fetch_prices,
-    fetch_funding_rates,
-    run_backtest,
-    BacktestConfig,
+result = await backtest_yield_rotation(
+    symbol="USDC",
+    venues=["aave", "moonwell", "morpho"],
+    start_date="2025-08-01",
+    end_date="2026-01-01",
+    lookback_signal_days=7,
 )
+```
 
-# Fetch data
-prices = await fetch_prices(["BTC", "ETH"], "2025-01-01", "2025-02-01", interval="1h")
-funding = await fetch_funding_rates(["BTC", "ETH"], "2025-01-01", "2025-02-01")
+### Quick Start (delta-neutral)
 
-# Generate signals
-target_positions = my_strategy(prices, {"symbols": ["BTC", "ETH"]})
-
-# Configure and run
-config = BacktestConfig(
-    leverage=2.0,
-    fee_rate=0.0004,
-    funding_rates=funding,
-    enable_liquidation=True
+```python
+result = await backtest_delta_neutral(
+    symbols=["BTC", "ETH"],
+    start_date="2025-08-01",
+    end_date="2026-01-01",
+    funding_threshold=0.0001,  # Enter when funding > 0.01% per hour
 )
-result = run_backtest(prices, target_positions, config)
+print(f"Funding income: {result.stats['total_funding']:.4f}")  # Negative = received
 ```
 
 ### Key Metrics
 
-- **`sharpe`** - Risk-adjusted returns (>1.0 good, >2.0 excellent)
-- **`sortino`** - Like Sharpe but only penalizes downside volatility
-- **`cagr`** - Annualized return (%)
-- **`max_drawdown`** - Largest peak-to-trough decline (%)
-- **`profit_factor`** - Gross profit / gross loss (>1.5 good)
+- **`sharpe`** - Risk-adjusted returns (>1.0 good, >2.0 excellent; yield strategies often >3.0)
+- **`total_return`** - Cumulative return (decimal: 0.45 = 45%)
+- **`max_drawdown`** - Largest peak-to-trough decline (near-zero for yield strategies)
+- **`total_funding`** - Funding income/cost for delta-neutral (negative = income received)
+- **`trade_count`** - Rebalances; keep low for yield strategies (each switch = gas cost)
+
+All stats are decimals — always format with `:.2%`.
 
 ### From Backtest to Production
 
 Once validated:
-1. Create strategy class: `just create-strategy "Strategy Name"`
+1. `just create-strategy "Strategy Name"`
 2. Implement Strategy interface (deposit, update, withdraw, exit)
 3. Add adapters and manifest
 4. Write smoke tests
 5. Deploy with small capital first
 
-See `/backtest-strategy` skill for full guide, common patterns, and gotchas.
+See `/backtest-strategy` skill for full guide, all strategy patterns, and gotchas.
 
 ## Contract development
 
@@ -309,9 +315,17 @@ For anything beyond a simple single swap, follow this checklist:
 
 1. **Plan** — Break the transaction into ordered steps. Identify which chains, protocols, and tokens are involved. State the plan to the user before writing any code.
 2. **Gather info** — Load the relevant protocol skill(s). Fetch current rates, balances, gas, and any addresses or parameters the script needs. Don't hardcode values you haven't verified.
-3. **Script** — Write the script under `$WAYFINDER_SCRATCH_DIR`. Use `get_adapter()` and the patterns from the loaded skill.
-4. **Offer simulation** — Use Gorlami forks for **EVM on-chain steps only**. Off-chain protocols (Hyperliquid L1, CEXes) are live-only.
-5. **Execute** — Run the script (or simulate first if requested). Check each step's result before proceeding to the next — don't continue past a failed/reverted transaction.
+3. **Quote all steps** — For every swap/bridge step, call `mcp__wayfinder__quote_swap` and collect the results. Then display a confirmation table to the user before executing anything:
+
+   | Step | From | To | Est. Output | Fee (USD) | Route |
+   |------|------|----|-------------|-----------|-------|
+   | 1    | ...  | .. | ...         | ...       | ...   |
+
+   Wait for explicit user confirmation before proceeding. Skip this only if the user has explicitly said to (e.g. "just execute").
+
+4. **Script** — Write the script under `$WAYFINDER_SCRATCH_DIR`. Use `get_adapter()` and the patterns from the loaded skill.
+5. **Offer simulation** — Use Gorlami forks for **EVM on-chain steps only**. Off-chain protocols (Hyperliquid L1, CEXes) are live-only.
+6. **Execute** — Run the script (or simulate first if requested). Check each step's result before proceeding to the next — don't continue past a failed/reverted transaction.
 
 Hyperliquid minimums:
 
