@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import socket
 import threading
 from dataclasses import dataclass
@@ -14,6 +15,16 @@ from wayfinder_paths.packs.manifest import PackManifest, PackManifestError
 
 class PackPreviewError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class PreviewInspection:
+    slug: str
+    name: str
+    applet_manifest_path: Path
+    applet_root: Path
+    entry: str
+    entry_path: Path
 
 
 @dataclass(frozen=True)
@@ -37,12 +48,7 @@ def _serve_dir(directory: Path, *, port: int) -> tuple[ThreadingHTTPServer, int]
     return server, actual_port
 
 
-def preview_pack(
-    *,
-    pack_dir: Path,
-    parent_port: int = 3333,
-    applet_port: int = 3334,
-) -> PreviewUrls:
+def inspect_preview_pack(*, pack_dir: Path) -> PreviewInspection:
     pack_dir = pack_dir.resolve()
     manifest_path = pack_dir / "wfpack.yaml"
     if not manifest_path.exists():
@@ -60,11 +66,53 @@ def preview_pack(
     if not applet_root.exists():
         raise PackPreviewError(f"Applet build_dir not found: {applet_root}")
 
+    applet_manifest_path = (pack_dir / manifest.applet.manifest_path).resolve()
+    if not applet_manifest_path.exists():
+        raise PackPreviewError(
+            f"Applet manifest not found: {applet_manifest_path}"
+        )
+
+    try:
+        applet_manifest = json.loads(applet_manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise PackPreviewError(
+            f"Failed to parse applet manifest: {applet_manifest_path}"
+        ) from exc
+
+    if not isinstance(applet_manifest, dict):
+        raise PackPreviewError("applet.manifest.json must be a JSON object")
+
+    entry = str(applet_manifest.get("entry") or "").strip() or "index.html"
+    entry_path = (applet_root / entry).resolve()
+    if not entry_path.exists():
+        raise PackPreviewError(f"Applet entry not found: {entry_path}")
+
+    return PreviewInspection(
+        slug=manifest.slug,
+        name=manifest.name,
+        applet_manifest_path=applet_manifest_path,
+        applet_root=applet_root,
+        entry=entry,
+        entry_path=entry_path,
+    )
+
+
+def preview_pack(
+    *,
+    pack_dir: Path,
+    parent_port: int = 3333,
+    applet_port: int = 3334,
+) -> PreviewUrls:
+    inspection = inspect_preview_pack(pack_dir=pack_dir)
+
     with TemporaryDirectory(prefix="wfpack-preview-") as tmp:
         tmp_dir = Path(tmp)
         parent_html = tmp_dir / "index.html"
 
-        applet_server, applet_actual_port = _serve_dir(applet_root, port=applet_port)
+        applet_server, applet_actual_port = _serve_dir(
+            inspection.applet_root,
+            port=applet_port,
+        )
         applet_url = f"http://127.0.0.1:{applet_actual_port}/"
 
         parent_html.write_text(
@@ -75,7 +123,7 @@ def preview_pack(
                     "  <head>",
                     "    <meta charset='utf-8' />",
                     "    <meta name='viewport' content='width=device-width, initial-scale=1' />",
-                    f"    <title>Pack Preview: {manifest.slug}</title>",
+                    f"    <title>Pack Preview: {inspection.slug}</title>",
                     "    <style>",
                     "      :root { color-scheme: dark; font-family: ui-sans-serif, system-ui; }",
                     "      body { margin: 0; padding: 16px; background: #0b0f0c; color: #e7f5ea; }",
@@ -88,13 +136,12 @@ def preview_pack(
                     "    <div class='row'>",
                     "      <div class='card' style='flex: 1 1 520px'>",
                     "        <div style='opacity:.8'>Parent shell</div>",
-                    f"        <div style='font-size:18px;margin-top:6px'>{manifest.name}</div>",
-                    f"        <div style='opacity:.7;margin-top:8px'>{manifest.summary}</div>",
+                    f"        <div style='font-size:18px;margin-top:6px'>{inspection.name}</div>",
                     "        <div style='opacity:.7;margin-top:10px'>Bridge: <span id='bridge'>pending</span></div>",
                     "      </div>",
                     "    </div>",
                     "    <div class='card' style='margin-top:12px'>",
-                    f"      <iframe id='applet' sandbox='allow-scripts allow-forms allow-popups' src='{applet_url}index.html'></iframe>",
+                    f"      <iframe id='applet' sandbox='allow-scripts allow-forms allow-popups' src='{applet_url}{inspection.entry}'></iframe>",
                     "    </div>",
                     "    <script>",
                     "      const iframe = document.getElementById('applet');",
@@ -127,8 +174,8 @@ def preview_pack(
             threading.Thread(target=serve, args=(applet_server,), daemon=True),
             threading.Thread(target=serve, args=(parent_server,), daemon=True),
         ]
-        for t in threads:
-            t.start()
+        for thread in threads:
+            thread.start()
 
         try:
             print(

@@ -22,3 +22,10 @@ components:
 applet:
   build_dir: "applet/dist"
   manifest: "applet/applet.manifest.json"
+
+skill:
+  enabled: true
+  source: generated
+  name: "boros-carry-demo"
+  description: "Inspect the Boros carry demo pack, explain the two backtests, and run the included scripts or applet preview."
+  instructions: "skill/instructions.md"

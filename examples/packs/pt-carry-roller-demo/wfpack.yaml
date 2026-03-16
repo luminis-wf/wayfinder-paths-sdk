@@ -22,3 +22,9 @@ applet:
   build_dir: "applet/dist"
   manifest: "applet/applet.manifest.json"
 
+skill:
+  enabled: true
+  source: generated
+  name: "pt-carry-roller-demo"
+  description: "Inspect the PT carry roller demo pack, explain the PT selection logic, and run pack validation or preview tasks."
+  instructions: "skill/instructions.md"

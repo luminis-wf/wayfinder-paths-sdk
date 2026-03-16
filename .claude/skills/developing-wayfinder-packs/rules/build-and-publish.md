@@ -5,10 +5,18 @@
 From your pack directory (must contain `wfpack.yaml`):
 
 ```bash
+poetry run wayfinder pack fmt --path .
+poetry run wayfinder pack doctor --check --path .
+poetry run wayfinder pack render-skill --path .
 poetry run wayfinder pack build --path . --out dist/bundle.zip
 ```
 
 Output includes the bundle sha256 and writes the zip to `--out`.
+
+Notes:
+- `build` and `publish` automatically rerun pack validation and skill rendering before packaging.
+- Generated skill exports are written under `.build/skills/...` and are not included in `bundle.zip`.
+- `poetry run wayfinder pack preview --check --path .` validates applet preview readiness without starting servers.
 
 ## Configure Packs API base URL
 
@@ -35,3 +43,15 @@ Notes:
 - Publishing requires a valid `WAYFINDER_API_KEY` (or `config.json` → `system.api_key`).
 - `--owner-wallet` must match a wallet associated with your account (how ownership is enforced will evolve).
 
+## Git hooks
+
+Install pack-focused pre-commit hooks into the current pack directory:
+
+```bash
+poetry run wayfinder pack hooks install --path .
+```
+
+That writes `.pre-commit-config.yaml` with:
+- `wayfinder pack fmt --path .`
+- `wayfinder pack doctor --check --path .`
+- `wayfinder pack preview --check --path .` on `pre-push`

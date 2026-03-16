@@ -21,3 +21,10 @@ components:
 applet:
   build_dir: "applet/dist"
   manifest: "applet/applet.manifest.json"
+
+skill:
+  enabled: true
+  source: generated
+  name: "virtual-delta-neutral"
+  description: "Inspect the VIRTUAL delta-neutral monitor pack, explain its monitoring logic, and preview or validate the applet assets."
+  instructions: "skill/instructions.md"

@@ -41,18 +41,26 @@ def fetch_data(lookback_days: int = 30) -> list[dict]:
             funding_map[ts] = f
 
     virtual_lending_map = {}
-    for l in virtual_ts.get("lending", []):
-        ts = _normalize_ts(l["ts"])
-        venue = (l.get("venue") or "").lower()
+    for lending_point in virtual_ts.get("lending", []):
+        ts = _normalize_ts(lending_point["ts"])
+        venue = (lending_point.get("venue") or "").lower()
         if "moonwell" in venue:
-            virtual_lending_map[ts] = l.get("supply_apr") or l.get("net_supply_apr") or 0
+            virtual_lending_map[ts] = (
+                lending_point.get("supply_apr")
+                or lending_point.get("net_supply_apr")
+                or 0
+            )
 
     usdc_lending_map = {}
-    for l in usdc_ts.get("lending", []):
-        ts = _normalize_ts(l["ts"])
-        venue = (l.get("venue") or "").lower()
+    for lending_point in usdc_ts.get("lending", []):
+        ts = _normalize_ts(lending_point["ts"])
+        venue = (lending_point.get("venue") or "").lower()
         if "moonwell" in venue:
-            usdc_lending_map[ts] = l.get("supply_apr") or l.get("net_supply_apr") or 0
+            usdc_lending_map[ts] = (
+                lending_point.get("supply_apr")
+                or lending_point.get("net_supply_apr")
+                or 0
+            )
 
     # Merge on timestamps that have price data
     all_ts = sorted(price_map.keys())

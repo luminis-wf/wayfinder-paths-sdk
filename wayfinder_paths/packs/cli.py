@@ -11,13 +11,60 @@ import click
 
 from wayfinder_paths.packs.builder import PackBuilder, PackBuildError
 from wayfinder_paths.packs.client import PacksApiClient, PacksApiError
-from wayfinder_paths.packs.doctor import PackDoctorError, run_doctor
-from wayfinder_paths.packs.preview import PackPreviewError, preview_pack
+from wayfinder_paths.packs.doctor import PackDoctorError, PackDoctorReport, run_doctor
+from wayfinder_paths.packs.formatter import PackFormatError, format_pack
+from wayfinder_paths.packs.hooks import PackHooksError, install_pack_hooks
+from wayfinder_paths.packs.preview import (
+    PackPreviewError,
+    inspect_preview_pack,
+    preview_pack,
+)
+from wayfinder_paths.packs.renderer import (
+    PackSkillRenderError,
+    PackSkillRenderReport,
+    render_skill_exports,
+)
 from wayfinder_paths.packs.scaffold import PackScaffoldError, init_pack, slugify
 
 
 def _echo_json(data: Any) -> None:
     click.echo(json.dumps(data, indent=2, default=str))
+
+
+def _doctor_result_payload(report: PackDoctorReport) -> dict[str, Any]:
+    return {
+        "slug": report.slug,
+        "version": report.version,
+        "primary_kind": report.primary_kind,
+        "errors": [{"message": i.message, "path": i.path} for i in report.errors],
+        "warnings": [{"message": i.message, "path": i.path} for i in report.warnings],
+        "created_files": report.created_files,
+    }
+
+
+def _raise_for_doctor_errors(report: PackDoctorReport) -> None:
+    if report.ok:
+        return
+    details = "\n".join(
+        f"- {issue.message}" + (f" ({issue.path})" if issue.path else "")
+        for issue in report.errors
+    )
+    raise click.ClickException(f"Pack doctor found errors\n{details}")
+
+
+def _prepare_pack_for_build(pack_dir: Path) -> tuple[PackDoctorReport, PackSkillRenderReport]:
+    try:
+        doctor_report = run_doctor(pack_dir=pack_dir, fix=False, overwrite=False)
+    except PackDoctorError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _raise_for_doctor_errors(doctor_report)
+
+    try:
+        render_report = render_skill_exports(pack_dir=pack_dir)
+    except PackSkillRenderError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    return doctor_report, render_report
 
 
 @click.group(name="pack", help="Build, publish, and emit signals for Packs.")
@@ -51,6 +98,7 @@ def pack_cli() -> None:
 )
 @click.option("--tag", "tags", multiple=True, help="Tag (repeatable).")
 @click.option("--applet/--no-applet", default=False, show_default=True)
+@click.option("--skill/--no-skill", default=True, show_default=True)
 @click.option(
     "--overwrite", is_flag=True, help="Overwrite scaffolded files if they exist."
 )
@@ -63,6 +111,7 @@ def init_cmd(
     primary_kind: str,
     tags: tuple[str, ...],
     applet: bool,
+    skill: bool,
     overwrite: bool,
 ) -> None:
     safe_slug = slugify(slug)
@@ -77,6 +126,7 @@ def init_cmd(
             primary_kind=primary_kind.lower(),
             tags=list(tags) if tags else None,
             with_applet=applet,
+            with_skill=skill,
             overwrite=overwrite,
         )
     except PackScaffoldError as exc:
@@ -107,59 +157,138 @@ def init_cmd(
     name="doctor", help="Validate a pack folder and optionally fix common issues."
 )
 @click.option("--path", "pack_path", default=".", show_default=True)
+@click.option(
+    "--check",
+    is_flag=True,
+    help="Validation-only mode. Equivalent to the default behavior.",
+)
 @click.option("--fix", is_flag=True, help="Create missing recommended files.")
 @click.option(
     "--overwrite", is_flag=True, help="Overwrite generated files when using --fix."
 )
-def doctor_cmd(pack_path: str, fix: bool, overwrite: bool) -> None:
+def doctor_cmd(pack_path: str, check: bool, fix: bool, overwrite: bool) -> None:
+    if check and fix:
+        raise click.ClickException("--check cannot be used together with --fix")
+
     try:
         report = run_doctor(pack_dir=Path(pack_path), fix=fix, overwrite=overwrite)
     except PackDoctorError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    _echo_json({"ok": report.ok, "result": _doctor_result_payload(report)})
+    _raise_for_doctor_errors(report)
+
+
+@pack_cli.command(name="fmt", help="Format pack metadata and generated skill exports.")
+@click.option("--path", "pack_path", default=".", show_default=True)
+def fmt_cmd(pack_path: str) -> None:
+    try:
+        report = format_pack(pack_dir=Path(pack_path))
+    except PackFormatError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": {"changed_files": report.changed_files}})
+
+
+@pack_cli.command(
+    name="render-skill", help="Generate host-specific skill exports under .build/."
+)
+@click.option("--path", "pack_path", default=".", show_default=True)
+def render_skill_cmd(pack_path: str) -> None:
+    try:
+        report = render_skill_exports(pack_dir=Path(pack_path))
+    except PackSkillRenderError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     _echo_json(
         {
-            "ok": report.ok,
+            "ok": True,
             "result": {
-                "slug": report.slug,
-                "version": report.version,
-                "primary_kind": report.primary_kind,
-                "errors": [
-                    {"message": i.message, "path": i.path} for i in report.errors
-                ],
-                "warnings": [
-                    {"message": i.message, "path": i.path} for i in report.warnings
-                ],
-                "created_files": report.created_files,
+                "output_root": str(report.output_root),
+                "rendered_hosts": report.rendered_hosts,
+                "written_files": report.written_files,
             },
         }
     )
-
-    if not report.ok:
-        raise click.ClickException("Pack doctor found errors")
 
 
 @pack_cli.command(
     name="preview", help="Serve a local parent-shell preview for this pack's applet."
 )
 @click.option("--path", "pack_path", default=".", show_default=True)
+@click.option(
+    "--check",
+    is_flag=True,
+    help="Validate preview prerequisites without starting local servers.",
+)
 @click.option("--parent-port", default=3333, show_default=True, type=int)
 @click.option("--applet-port", default=3334, show_default=True, type=int)
-def preview_cmd(pack_path: str, parent_port: int, applet_port: int) -> None:
+def preview_cmd(
+    pack_path: str,
+    check: bool,
+    parent_port: int,
+    applet_port: int,
+) -> None:
     try:
+        if check:
+            inspection = inspect_preview_pack(pack_dir=Path(pack_path))
+            _echo_json(
+                {
+                    "ok": True,
+                    "result": {
+                        "slug": inspection.slug,
+                        "name": inspection.name,
+                        "applet_root": str(inspection.applet_root),
+                        "entry": inspection.entry,
+                        "entry_path": str(inspection.entry_path),
+                    },
+                }
+            )
+            return
+
         preview_pack(
-            pack_dir=Path(pack_path), parent_port=parent_port, applet_port=applet_port
+            pack_dir=Path(pack_path),
+            parent_port=parent_port,
+            applet_port=applet_port,
         )
     except PackPreviewError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@pack_cli.group(name="hooks", help="Install local git hook automation for a pack.")
+def hooks_group() -> None:
+    pass
+
+
+@hooks_group.command(name="install", help="Write or update .pre-commit-config.yaml.")
+@click.option("--path", "pack_path", default=".", show_default=True)
+def hooks_install_cmd(pack_path: str) -> None:
+    try:
+        report = install_pack_hooks(pack_dir=Path(pack_path))
+    except PackHooksError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "config_path": str(report.config_path),
+                "changed": report.changed,
+                "hooks": report.hooks,
+            },
+        }
+    )
 
 
 @pack_cli.command(name="build", help="Create a bundle.zip from a pack directory.")
 @click.option("--path", "pack_path", default=".", show_default=True)
 @click.option("--out", "out_path", default="dist/bundle.zip", show_default=True)
 def build_cmd(pack_path: str, out_path: str) -> None:
+    pack_dir = Path(pack_path)
+    doctor_report, render_report = _prepare_pack_for_build(pack_dir)
+
     try:
-        built = PackBuilder.build(pack_dir=Path(pack_path), out_path=Path(out_path))
+        built = PackBuilder.build(pack_dir=pack_dir, out_path=Path(out_path))
     except PackBuildError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -171,6 +300,8 @@ def build_cmd(pack_path: str, out_path: str) -> None:
                 "version": built.manifest.version,
                 "bundle_path": str(built.bundle_path),
                 "bundle_sha256": built.bundle_sha256,
+                "warnings": len(doctor_report.warnings),
+                "rendered_hosts": render_report.rendered_hosts,
             },
         }
     )
@@ -195,8 +326,11 @@ def publish_cmd(
     owner_wallet: str | None,
     source_path: str | None,
 ) -> None:
+    pack_dir = Path(pack_path)
+    _prepare_pack_for_build(pack_dir)
+
     try:
-        built = PackBuilder.build(pack_dir=Path(pack_path), out_path=Path(out_path))
+        built = PackBuilder.build(pack_dir=pack_dir, out_path=Path(out_path))
     except PackBuildError as exc:
         raise click.ClickException(str(exc)) from exc
 

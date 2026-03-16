@@ -12,7 +12,8 @@ Use this skill when you are:
 - Adding a static applet UI to a pack
 - Publishing a new pack version
 - Emitting signals/receipts to make a pack page feel “alive”
-- Writing a skill/SKILL.md to make your pack usable by AI agents (Claude Code, OpenClaw, Codex)
+- Defining canonical pack skill source in `wfpack.yaml` + `skill/instructions.md`
+- Generating host-specific skill exports for Claude Code, Codex, OpenClaw, and portable use
 
 ## How to use
 
@@ -21,5 +22,4 @@ Use this skill when you are:
 - [rules/build-and-publish.md](rules/build-and-publish.md) - `wayfinder pack build/publish` + required config/env vars
 - [rules/signals.md](rules/signals.md) - `wayfinder pack signal emit` patterns
 - [rules/security.md](rules/security.md) - MVP hosting constraints and safe defaults
-- [rules/pack-skills.md](rules/pack-skills.md) - Writing skill/SKILL.md so AI agents can understand and operate your pack
-
+- [rules/pack-skills.md](rules/pack-skills.md) - Defining canonical skill source and generating host-specific exports

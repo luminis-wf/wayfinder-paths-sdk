@@ -67,6 +67,7 @@ def _build_wfpack_yaml(
     component_kind: str,
     component_path: str,
     with_applet: bool,
+    with_skill: bool,
 ) -> str:
     tags_unique: list[str] = []
     for tag in tags:
@@ -75,6 +76,8 @@ def _build_wfpack_yaml(
             continue
         if t not in tags_unique:
             tags_unique.append(t)
+
+    description = summary.strip() or f"Use the {slug} pack through Wayfinder."
 
     lines: list[str] = []
     lines.append('schema_version: "0.1"')
@@ -102,6 +105,15 @@ def _build_wfpack_yaml(
         lines.append('  build_dir: "applet/dist"')
         lines.append('  manifest: "applet/applet.manifest.json"')
 
+    if with_skill:
+        lines.append("")
+        lines.append("skill:")
+        lines.append("  enabled: true")
+        lines.append("  source: generated")
+        lines.append(f"  name: {_yaml_quote(slug)}")
+        lines.append(f"  description: {_yaml_quote(description)}")
+        lines.append('  instructions: "skill/instructions.md"')
+
     lines.append("")
     return "\n".join(lines)
 
@@ -116,6 +128,7 @@ def init_pack(
     primary_kind: str = "bundle",
     tags: list[str] | None = None,
     with_applet: bool = False,
+    with_skill: bool = True,
     overwrite: bool = False,
 ) -> PackInitResult:
     slug = slugify(slug)
@@ -150,6 +163,7 @@ def init_pack(
         component_kind=component_kind,
         component_path=component_path,
         with_applet=with_applet,
+        with_skill=with_skill,
     )
 
     ctx: dict[str, Any] = {
@@ -179,10 +193,13 @@ def init_pack(
 
     write("wfpack.yaml", manifest_text)
     write("README.md", _render_template(_read_template("README.md.tmpl"), ctx))
-    write(
-        "skill/SKILL.md", _render_template(_read_template("skill/SKILL.md.tmpl"), ctx)
-    )
     write(component_path, _render_template(_read_template(component_template), ctx))
+
+    if with_skill:
+        write(
+            "skill/instructions.md",
+            _render_template(_read_template("skill/instructions.md.tmpl"), ctx),
+        )
 
     if with_applet:
         write(
@@ -209,6 +226,7 @@ def init_pack(
             "version": version,
             "primary_kind": primary_kind,
             "with_applet": with_applet,
+            "with_skill": with_skill,
             "component_path": component_path,
         },
     }

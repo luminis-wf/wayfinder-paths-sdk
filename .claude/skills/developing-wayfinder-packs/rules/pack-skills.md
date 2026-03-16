@@ -1,128 +1,84 @@
-# Writing Pack Skills (`skill/SKILL.md`)
+# Pack Skills
 
-A pack skill is a `SKILL.md` file inside a published pack that lets AI agents (Claude Code, OpenClaw, Codex) understand what the pack does and how to operate it. It is distinct from a README — a README is for humans browsing a repo; SKILL.md is structured for agent consumption.
+Wayfinder packs should treat skill support as explicit manifest behavior, not as an ad hoc `skill/SKILL.md` file that authors hand-maintain for every host.
 
-## File location
+## Canonical source
 
-The skill file **must** live at `skill/SKILL.md` inside the pack root (next to `wfpack.yaml`).
+For normal packs, the source of truth is:
 
-- `wayfinder pack init` auto-creates it from a template.
-- `wayfinder pack doctor --fix` will scaffold a missing one.
+- `wfpack.yaml`
+- `skill/instructions.md`
+- optional `skill/scripts/`
+- optional `skill/references/`
+- optional `skill/assets/`
 
-## Frontmatter schema
-
-Every SKILL.md starts with YAML frontmatter:
+Recommended manifest block:
 
 ```yaml
----
-name: my-pack                       # required — matches wfpack.yaml slug
-description: "One-line summary"     # required — what the pack does
-license: MIT                        # optional
-compatibility: "Requires X and Y"  # optional — runtime/data dependencies
-metadata:
-  tags: [wayfinder, defi, lending]  # required — discovery tags
----
+skill:
+  enabled: true
+  source: generated
+  name: "my-pack"
+  description: "Inspect, validate, and operate the pack."
+  instructions: "skill/instructions.md"
 ```
 
-## Required sections
+The `instructions` file should contain prose only. Keep host-specific metadata in `wfpack.yaml`.
 
-These three sections are the minimum for an agent to discover and use the pack:
+## Generated exports
 
-### `## When to use`
+Run:
 
-Bullet list of concrete scenarios. This is the most important section — agents use it for skill discovery and routing.
-
-```markdown
-## When to use
-
-- Evaluating whether a VIRTUAL delta-neutral position outperforms USDC lending
-- Building yield comparison strategies with regime switching
-- Deploying an automated delta-neutral strategy via the Wayfinder SDK
+```bash
+wayfinder pack render-skill --path .
 ```
 
-### `## What it does`
+This generates host-specific artifacts under `.build/skills/`:
 
-2–4 sentence plain-English explanation of the pack's behavior. No code, no jargon soup.
+- `claude/<skill-name>/SKILL.md`
+- `codex/<skill-name>/SKILL.md`
+- `codex/<skill-name>/agents/openai.yaml`
+- `openclaw/<skill-name>/SKILL.md`
+- `portable/<skill-name>/SKILL.md`
+- `portable/<skill-name>/scripts/run_pack.py`
 
-### `## Quick start`
+Optional `skill/scripts`, `skill/references`, and `skill/assets` folders are copied into each host export.
 
-A concrete CLI or code snippet that an agent (or human) can run immediately:
+## Validation
 
-```markdown
-## Quick start
+`wayfinder pack doctor --check --path .` enforces the common cross-host contract:
 
-\```bash
-poetry run python scripts/run.py --action update
-\```
+- `skill.enabled: true`
+- `skill.source: generated | provided`
+- `skill.name` matches lowercase letters, numbers, and hyphens
+- `skill.description` is non-empty
+- generated mode includes a real `skill/instructions.md`
+- provided mode includes a real `skill/SKILL.md`
+
+`wayfinder pack doctor --fix --path .` can scaffold missing generated-mode stubs like `skill/instructions.md`, but it does not invent missing required manifest fields.
+
+## Provided mode
+
+Power users can opt into:
+
+```yaml
+skill:
+  enabled: true
+  source: provided
+  name: "my-pack"
+  description: "Custom hand-authored skill source."
 ```
 
-## Optional sections
+In that mode, authors maintain `skill/SKILL.md` directly and `doctor` validates it instead of generating from `skill/instructions.md`.
 
-Include these when they add meaningful detail:
+## Formatting boundary
 
-| Section | Use when… |
-|---|---|
-| `## Strategy logic` | The pack has decision rules, thresholds, or state machines |
-| `## Execution` | There are deployment, scheduling, or adapter-wiring details |
-| `## Data sources` | The pack consumes external APIs or data feeds |
-| `## Customization` | Users can tune parameters, swap assets, or fork the logic |
-| `## Signals` | The pack emits signals via `wayfinder pack signal emit` |
+`wayfinder pack fmt --path .` is intentionally artifact-oriented.
 
-## The `references/` pattern
+It normalizes:
+- `wfpack.yaml`
+- `applet.manifest.json`
+- generated skill exports
+- generated host metadata
 
-When SKILL.md alone would exceed ~150 lines, push detail into `skill/references/*.md` and link from the relevant section:
-
-```markdown
-## Strategy logic
-
-The regime decision compares DN net yield against USDC supply APR…
-
-See [references/strategy-logic.md](references/strategy-logic.md) for the full algorithm and parameter table.
-```
-
-Convention:
-- **SDK skills** use `rules/` for sub-documents (e.g. `.claude/skills/my-skill/rules/`)
-- **Pack skills** use `references/` for sub-documents (e.g. `skill/references/`)
-
-Add a `## References` section at the bottom linking all reference files.
-
-## Anti-patterns
-
-- **Don't just list files.** An agent can read a directory — SKILL.md should explain *intent*, not *structure*.
-- **Don't duplicate the README.** README covers install/contributing/license; SKILL.md covers what an agent needs to operate the pack.
-- **Don't leave the template unmodified.** The `<!-- placeholder -->` comments from `pack init` must be replaced with real content before publishing.
-
-## Example
-
-Condensed example for a lending monitor pack:
-
-```markdown
----
-name: lending-monitor
-description: "Monitors lending rates across venues and emits alerts when spreads exceed thresholds."
-metadata:
-  tags: [wayfinder, lending, monitor, alerts]
----
-
-## When to use
-
-- Tracking lending rate changes across multiple DeFi venues
-- Setting up automated alerts when rate spreads exceed a threshold
-- Comparing supply APRs across Aave, Compound, and Moonwell
-
-## What it does
-
-Polls lending rates from configured venues every 15 minutes. When the spread
-between the best and worst rate exceeds a configurable threshold, it emits a
-signal with the current rates and spread.
-
-## Quick start
-
-wayfinder pack signal emit --slug lending-monitor --title "Rate Alert" --message "USDC spread: 2.1%"
-
-## Signals
-
-- `rate-alert` — emitted when spread exceeds threshold (includes venue, asset, spread fields)
-```
-
-For a full reference implementation with `references/` files, see the `virtual-delta-neutral` example pack in vault-backend at `examples/packs/virtual-delta-neutral/`.
+It does not rewrite arbitrary Python, TypeScript, or Solidity source files unless the user chooses separate language formatters.

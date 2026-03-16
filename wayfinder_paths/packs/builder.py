@@ -22,6 +22,7 @@ class BuiltPack:
 
 
 _DEFAULT_IGNORE_DIRS = {
+    ".build",
     ".git",
     ".venv",
     "__pycache__",

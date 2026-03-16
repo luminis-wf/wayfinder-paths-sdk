@@ -60,3 +60,51 @@ components:
 MVP behavior:
 - The backend does not strictly validate `components` yet, but it will be persisted in `manifest`.
 
+## Optional: skill
+
+If the pack should export AI skill artifacts, add an explicit `skill` block.
+
+Generated mode is the default and recommended pattern:
+
+```yaml
+skill:
+  enabled: true
+  source: generated
+  name: "basis-board"
+  description: "Inspect, validate, and operate the Basis Board pack."
+  instructions: "skill/instructions.md"
+```
+
+Rules:
+- `enabled: true` opt-ins the pack to skill validation and rendering.
+- `source` must be `generated` or `provided`.
+- `name` must be lowercase letters, numbers, and hyphens, max 64 chars.
+- `description` must be non-empty and <= 1024 chars.
+- `instructions` is required for `source: generated`.
+
+Host overrides are optional:
+
+```yaml
+skill:
+  enabled: true
+  source: generated
+  name: "basis-board"
+  description: "Inspect, validate, and operate the Basis Board pack."
+  instructions: "skill/instructions.md"
+  claude:
+    disable_model_invocation: true
+    allowed_tools: ["Read", "Bash"]
+  codex:
+    allow_implicit_invocation: false
+  openclaw:
+    user_invocable: true
+    requires:
+      bins: ["uv"]
+    install:
+      - id: "uv"
+        kind: "uv"
+        package: "wayfinder-paths==0.8.0"
+  portable:
+    python: ">=3.12"
+    package: "wayfinder-paths==0.8.0"
+```
