@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +15,15 @@ class PacksApiError(Exception):
 
 
 class PacksApiClient:
-    def __init__(self, *, api_base_url: str | None = None):
+    def __init__(
+        self,
+        *,
+        api_base_url: str | None = None,
+        client: httpx.Client | None = None,
+    ):
         base = (api_base_url or get_packs_api_base_url()).rstrip("/")
         self.base_url = base
-        self._client = httpx.Client(timeout=httpx.Timeout(60))
+        self._client = client or httpx.Client(timeout=httpx.Timeout(60))
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -32,6 +38,8 @@ class PacksApiClient:
         bundle_path: Path,
         owner_wallet: str | None = None,
         source_path: Path | None = None,
+        exports_manifest: dict[str, Any] | None = None,
+        skill_exports: dict[str, bytes] | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}/api/v1/packs/publish/"
         data: dict[str, str] = {}
@@ -47,10 +55,74 @@ class PacksApiClient:
                 source_path.read_bytes(),
                 "application/zip",
             )
+        if exports_manifest:
+            files["exports_manifest"] = (
+                "exports_manifest.json",
+                json.dumps(exports_manifest).encode("utf-8"),
+                "application/json",
+            )
+        if skill_exports:
+            for target, export_bytes in skill_exports.items():
+                files[f"skill-{target}"] = (
+                    f"skill-{target}.zip",
+                    export_bytes,
+                    "application/zip",
+                )
 
         resp = self._client.post(url, data=data, files=files, headers=self._headers())
         if resp.status_code >= 400:
             raise PacksApiError(f"Publish failed ({resp.status_code}): {resp.text}")
+        return resp.json()
+
+    def create_install_intent(
+        self,
+        *,
+        slug: str,
+        version: str,
+        runtime: str = "sdk-cli",
+        wallet_address: str | None = None,
+        install_target: str | None = None,
+    ) -> dict[str, Any]:
+        url = f"{self.base_url}/api/v1/packs/{slug}/install-intent/"
+        body: dict[str, Any] = {"version": version, "runtime": runtime}
+        if wallet_address:
+            body["wallet_address"] = wallet_address
+        if install_target:
+            body["install_target"] = install_target
+
+        resp = self._client.post(url, json=body, headers=self._headers())
+        if resp.status_code >= 400:
+            raise PacksApiError(
+                f"Create install intent failed ({resp.status_code}): {resp.text}"
+            )
+        return resp.json()
+
+    def submit_install_receipt(
+        self,
+        *,
+        slug: str,
+        intent: dict[str, Any],
+        signature: str,
+        runtime: str,
+        install_path: str | None = None,
+        extracted_files: int | None = None,
+    ) -> dict[str, Any]:
+        url = f"{self.base_url}/api/v1/packs/{slug}/install-receipt/"
+        body: dict[str, Any] = {
+            "intent": intent,
+            "signature": signature,
+            "runtime": runtime,
+        }
+        if install_path:
+            body["install_path"] = install_path
+        if extracted_files is not None:
+            body["extracted_files"] = extracted_files
+
+        resp = self._client.post(url, json=body, headers=self._headers())
+        if resp.status_code >= 400:
+            raise PacksApiError(
+                f"Install receipt failed ({resp.status_code}): {resp.text}"
+            )
         return resp.json()
 
     def emit_signal(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,6 +51,55 @@ def _raise_for_doctor_errors(report: PackDoctorReport) -> None:
         for issue in report.errors
     )
     raise click.ClickException(f"Pack doctor found errors\n{details}")
+
+
+def _skill_export_warning_strings(report: PackDoctorReport) -> list[str]:
+    return [
+        issue.message + (f" ({issue.path})" if issue.path else "")
+        for issue in report.warnings
+    ]
+
+
+def _zip_skill_export_dir(export_dir: Path) -> bytes:
+    buf = io.BytesIO()
+    with ZipFile(buf, "w") as zf:
+        for path in sorted(export_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            arcname = Path("skill") / path.relative_to(export_dir)
+            zf.write(path, arcname.as_posix())
+    return buf.getvalue()
+
+
+def _collect_skill_export_uploads(
+    render_report: PackSkillRenderReport,
+    doctor_report: PackDoctorReport,
+) -> tuple[dict[str, Any] | None, dict[str, bytes]]:
+    if not render_report.rendered_hosts:
+        return None, {}
+
+    skill_exports: dict[str, bytes] = {}
+    for host in render_report.rendered_hosts:
+        host_root = render_report.output_root / host
+        export_dirs = (
+            [path for path in host_root.iterdir() if path.is_dir()]
+            if host_root.exists()
+            else []
+        )
+        if len(export_dirs) != 1:
+            raise click.ClickException(
+                f"Expected exactly one rendered skill directory for host '{host}', found {len(export_dirs)}"
+            )
+        skill_exports[host] = _zip_skill_export_dir(export_dirs[0])
+
+    exports_manifest = {
+        "targets": render_report.rendered_hosts,
+        "doctor": {
+            "status": "warn" if doctor_report.warnings else "ok",
+            "warnings": _skill_export_warning_strings(doctor_report),
+        },
+    }
+    return exports_manifest, skill_exports
 
 
 def _prepare_pack_for_build(
@@ -329,19 +379,25 @@ def publish_cmd(
     source_path: str | None,
 ) -> None:
     pack_dir = Path(pack_path)
-    _prepare_pack_for_build(pack_dir)
+    doctor_report, render_report = _prepare_pack_for_build(pack_dir)
 
     try:
         built = PackBuilder.build(pack_dir=pack_dir, out_path=Path(out_path))
     except PackBuildError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    exports_manifest, skill_exports = _collect_skill_export_uploads(
+        render_report,
+        doctor_report,
+    )
     client = PacksApiClient(api_base_url=api_url)
     try:
         resp = client.publish(
             bundle_path=built.bundle_path,
             owner_wallet=owner_wallet,
             source_path=Path(source_path) if source_path else None,
+            exports_manifest=exports_manifest,
+            skill_exports=skill_exports,
         )
     except PacksApiError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -542,8 +598,27 @@ def install_cmd(
     dest = base / slug / desired_version
     bundle_path = dest / "bundle.zip"
 
+    intent_payload: dict[str, Any] | None = None
+    intent_signature = ""
+    warnings: list[str] = []
+
     if dest.exists() and any(dest.iterdir()) and not force:
         raise click.ClickException(f"Destination already exists (use --force): {dest}")
+
+    try:
+        intent_resp = client.create_install_intent(
+            slug=slug,
+            version=desired_version,
+            runtime="sdk-cli",
+            install_target=str(dest),
+        )
+        payload = intent_resp.get("intent")
+        signature = intent_resp.get("signature")
+        if isinstance(payload, dict) and isinstance(signature, str) and signature:
+            intent_payload = payload
+            intent_signature = signature
+    except PacksApiError as exc:
+        warnings.append(f"Could not create install intent: {exc}")
 
     dest.mkdir(parents=True, exist_ok=True)
     try:
@@ -585,6 +660,22 @@ def install_cmd(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(json.dumps(lock, indent=2, default=str) + "\n")
 
+    receipt_status = "skipped"
+    if intent_payload and intent_signature:
+        try:
+            receipt_resp = client.submit_install_receipt(
+                slug=slug,
+                intent=intent_payload,
+                signature=intent_signature,
+                runtime="sdk-cli",
+                install_path=str(dest),
+                extracted_files=len(extracted),
+            )
+            receipt_status = str(receipt_resp.get("status", "recorded"))
+        except PacksApiError as exc:
+            warnings.append(f"Could not submit install receipt: {exc}")
+            receipt_status = "error"
+
     _echo_json(
         {
             "ok": True,
@@ -596,6 +687,12 @@ def install_cmd(
                 "dest": str(dest),
                 "extracted_files": len(extracted),
                 "lockfile": str(lock_path),
+                "install_intent_id": intent_payload.get("intent_id")
+                if intent_payload
+                else None,
+                "verified_install": receipt_status in {"recorded", "duplicate"},
+                "install_receipt_status": receipt_status,
+                "warnings": warnings,
             },
         }
     )
