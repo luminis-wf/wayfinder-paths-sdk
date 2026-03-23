@@ -13,7 +13,9 @@ from wayfinder_paths.packs.cli import pack_cli
 from wayfinder_paths.packs.scaffold import init_pack
 
 
-def test_pack_publish_uploads_rendered_skill_exports(tmp_path: Path, monkeypatch):
+def test_pack_publish_uploads_rendered_skill_exports_and_bond_metadata(
+    tmp_path: Path, monkeypatch
+):
     pack_dir = tmp_path / "skill-demo"
     init_pack(
         pack_dir=pack_dir,
@@ -34,10 +36,19 @@ def test_pack_publish_uploads_rendered_skill_exports(tmp_path: Path, monkeypatch
             return {
                 "pack": {"slug": "skill-demo"},
                 "version": {"version": "0.1.0"},
-                "claimRequired": True,
-                "riskTier": "interactive",
-                "manageUrl": "https://app.example/packs/skill-demo/manage",
+                "ownerLinkRequired": True,
+                "effectiveRiskTier": "interactive",
+                "requiredInitialBond": "1000",
+                "requiredUpgradePendingBond": "1000",
+                "manageUrl": "https://app.example/packs/submissions/skill-demo?version=0.1.0",
                 "packId": "0xabc123",
+                "contractArgs": {
+                    "packId": "0xabc123",
+                    "bundleHash": "0xdef456",
+                    "riskTier": "interactive",
+                    "requiredInitialBondWei": "1000",
+                    "requiredUpgradePendingBondWei": "1000",
+                },
             }
 
     monkeypatch.setattr("wayfinder_paths.packs.cli.PacksApiClient", FakePublishClient)
@@ -52,6 +63,11 @@ def test_pack_publish_uploads_rendered_skill_exports(tmp_path: Path, monkeypatch
             str(pack_dir / "dist" / "bundle.zip"),
             "--api-url",
             "https://packs.example",
+            "--bonded",
+            "--owner-wallet",
+            "0x1234567890AbcdEF1234567890aBcdef12345678",
+            "--risk-tier",
+            "interactive",
         ],
     )
 
@@ -59,8 +75,9 @@ def test_pack_publish_uploads_rendered_skill_exports(tmp_path: Path, monkeypatch
     assert len(FakePublishClient.calls) == 1
     call = FakePublishClient.calls[0]
 
-    # owner_wallet must NOT be passed in publish kwargs
-    assert "owner_wallet" not in call
+    assert call["owner_wallet"] == "0x1234567890AbcdEF1234567890aBcdef12345678"
+    assert call["bonded"] is True
+    assert call["risk_tier"] == "interactive"
 
     exports_manifest = call["exports_manifest"]
     skill_exports = call["skill_exports"]
@@ -77,9 +94,36 @@ def test_pack_publish_uploads_rendered_skill_exports(tmp_path: Path, monkeypatch
         names = set(zf.namelist())
     assert "skill/agents/openai.yaml" in names
 
-    # Claim URL should be printed to stderr when claimRequired is true
-    assert "Claim ownership and bond at:" in result.output
-    assert "https://app.example/packs/skill-demo/manage" in result.output
+    assert "Link owner wallet and bond at:" in result.output
+    assert "https://app.example/packs/submissions/skill-demo?version=0.1.0" in result.output
+    assert "Effective risk tier: interactive" in result.output
+    assert "Required initial bond: 1000" in result.output
+    assert "Required upgrade pending bond: 1000" in result.output
+    assert "Bond contract args:" in result.output
+
+
+def test_pack_publish_requires_owner_wallet_for_bonded(tmp_path: Path):
+    pack_dir = tmp_path / "skill-demo"
+    init_pack(
+        pack_dir=pack_dir,
+        slug="skill-demo",
+        primary_kind="monitor",
+        with_applet=False,
+        with_skill=True,
+    )
+
+    result = CliRunner().invoke(
+        pack_cli,
+        [
+            "publish",
+            "--path",
+            str(pack_dir),
+            "--bonded",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--owner-wallet is required with --bonded" in result.output
 
 
 def test_pack_install_requests_intent_and_submits_receipt(tmp_path: Path, monkeypatch):
@@ -138,7 +182,14 @@ def test_pack_install_requests_intent_and_submits_receipt(tmp_path: Path, monkey
 
         def submit_install_receipt(self, **kwargs):
             self.__class__.receipt_calls.append(kwargs)
-            return {"status": "recorded"}
+            return {
+                "status": "recorded",
+                "installation_id": "install-123",
+                "heartbeat_token": "heartbeat-secret",
+            }
+
+        def submit_install_heartbeat(self, **kwargs):
+            return {"status": "recorded", "installation_id": kwargs["installation_id"]}
 
     monkeypatch.setattr("wayfinder_paths.packs.cli.PacksApiClient", FakeInstallClient)
 
@@ -164,6 +215,8 @@ def test_pack_install_requests_intent_and_submits_receipt(tmp_path: Path, monkey
 
     output = json.loads(result.output)
     assert output["result"]["install_intent_id"] == "intent-123"
+    assert output["result"]["installation_id"] == "install-123"
+    assert output["result"]["heartbeat_enabled"] is True
     assert output["result"]["verified_install"] is True
     assert output["result"]["warnings"] == []
 
@@ -171,3 +224,59 @@ def test_pack_install_requests_intent_and_submits_receipt(tmp_path: Path, monkey
     assert receipt["runtime"] == "sdk-cli"
     assert receipt["extracted_files"] > 0
     assert receipt["install_path"].endswith("install-demo/0.1.0")
+
+    lock = json.loads((tmp_path / ".wayfinder" / "packs.lock.json").read_text())
+    assert lock["packs"]["install-demo"]["installation_id"] == "install-123"
+    assert lock["packs"]["install-demo"]["heartbeat_token"] == "heartbeat-secret"
+
+
+def test_pack_heartbeat_install_uses_lockfile_credentials(tmp_path: Path, monkeypatch):
+    lock_dir = tmp_path / ".wayfinder"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "packs.lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "0.1",
+                "packs": {
+                    "install-demo": {
+                        "version": "0.1.0",
+                        "installation_id": "install-123",
+                        "heartbeat_token": "heartbeat-secret",
+                    }
+                },
+            }
+        )
+    )
+
+    class FakeHeartbeatClient:
+        heartbeat_calls: list[dict[str, object]] = []
+
+        def __init__(self, *, api_base_url=None):
+            self.api_base_url = api_base_url
+
+        def submit_install_heartbeat(self, **kwargs):
+            self.__class__.heartbeat_calls.append(kwargs)
+            return {"status": "recorded", "installation_id": kwargs["installation_id"]}
+
+    monkeypatch.setattr("wayfinder_paths.packs.cli.PacksApiClient", FakeHeartbeatClient)
+
+    result = CliRunner().invoke(
+        pack_cli,
+        [
+            "heartbeat-install",
+            "--slug",
+            "install-demo",
+            "--dir",
+            str(tmp_path / ".wayfinder" / "packs"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeHeartbeatClient.heartbeat_calls == [
+        {
+            "installation_id": "install-123",
+            "heartbeat_token": "heartbeat-secret",
+            "status": "active",
+        }
+    ]

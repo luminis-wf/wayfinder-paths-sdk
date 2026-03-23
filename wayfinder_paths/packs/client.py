@@ -39,9 +39,18 @@ class PacksApiClient:
         source_path: Path | None = None,
         exports_manifest: dict[str, Any] | None = None,
         skill_exports: dict[str, bytes] | None = None,
+        owner_wallet: str | None = None,
+        bonded: bool = False,
+        risk_tier: str | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}/api/v1/packs/publish/"
         data: dict[str, str] = {}
+        if owner_wallet:
+            data["owner_wallet"] = owner_wallet
+        if bonded:
+            data["bonded"] = "true"
+        if risk_tier:
+            data["risk_tier"] = risk_tier
 
         files: dict[str, tuple[str, bytes, str]] = {
             "bundle": ("bundle.zip", bundle_path.read_bytes(), "application/zip")
@@ -103,6 +112,7 @@ class PacksApiClient:
         runtime: str,
         install_path: str | None = None,
         extracted_files: int | None = None,
+        workspace_hash: str | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}/api/v1/packs/{slug}/install-receipt/"
         body: dict[str, Any] = {
@@ -114,11 +124,38 @@ class PacksApiClient:
             body["install_path"] = install_path
         if extracted_files is not None:
             body["extracted_files"] = extracted_files
+        if workspace_hash:
+            body["workspace_hash"] = workspace_hash
 
         resp = self._client.post(url, json=body, headers=self._headers())
         if resp.status_code >= 400:
             raise PacksApiError(
                 f"Install receipt failed ({resp.status_code}): {resp.text}"
+            )
+        return resp.json()
+
+    def submit_install_heartbeat(
+        self,
+        *,
+        installation_id: str,
+        heartbeat_token: str,
+        status: str | None = None,
+        metrics: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        url = f"{self.base_url}/api/v1/packs/installations/{installation_id}/heartbeat/"
+        body: dict[str, Any] = {}
+        if status:
+            body["status"] = status
+        if metrics:
+            body["metrics"] = metrics
+
+        headers = self._headers()
+        headers["X-Heartbeat-Token"] = heartbeat_token
+
+        resp = self._client.post(url, json=body, headers=headers)
+        if resp.status_code >= 400:
+            raise PacksApiError(
+                f"Install heartbeat failed ({resp.status_code}): {resp.text}"
             )
         return resp.json()
 

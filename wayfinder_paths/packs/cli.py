@@ -367,14 +367,32 @@ def build_cmd(pack_path: str, out_path: str) -> None:
 @click.option(
     "--source", "source_path", default=None, help="Optional source.zip to upload."
 )
+@click.option("--bonded/--unbonded", default=False, show_default=True)
+@click.option(
+    "--owner-wallet",
+    default=None,
+    help="Owner wallet for bonded publish metadata and contract args.",
+)
+@click.option(
+    "--risk-tier",
+    default=None,
+    type=click.Choice(["read_only", "interactive", "execution"], case_sensitive=False),
+    help="Requested risk tier for bonded publish.",
+)
 def publish_cmd(
     pack_path: str,
     out_path: str,
     api_url: str | None,
     source_path: str | None,
+    bonded: bool,
+    owner_wallet: str | None,
+    risk_tier: str | None,
 ) -> None:
     pack_dir = Path(pack_path)
     doctor_report, render_report = _prepare_pack_for_build(pack_dir)
+
+    if bonded and not owner_wallet:
+        raise click.ClickException("--owner-wallet is required with --bonded")
 
     try:
         built = PackBuilder.build(pack_dir=pack_dir, out_path=Path(out_path))
@@ -392,14 +410,38 @@ def publish_cmd(
             source_path=Path(source_path) if source_path else None,
             exports_manifest=exports_manifest,
             skill_exports=skill_exports,
+            owner_wallet=owner_wallet,
+            bonded=bonded,
+            risk_tier=risk_tier.lower() if risk_tier else None,
         )
     except PacksApiError as exc:
         raise click.ClickException(str(exc)) from exc
 
     _echo_json({"ok": True, "result": resp})
-    if resp.get("claimRequired"):
+    if resp.get("ownerLinkRequired"):
         manage_url = resp.get("manageUrl", "")
-        click.echo(f"\nClaim ownership and bond at: {manage_url}", err=True)
+        click.echo(f"\nLink owner wallet and bond at: {manage_url}", err=True)
+    elif resp.get("manageUrl"):
+        click.echo(f"\nManage at: {resp['manageUrl']}", err=True)
+    if resp.get("effectiveRiskTier"):
+        click.echo(
+            f"Effective risk tier: {resp['effectiveRiskTier']}",
+            err=True,
+        )
+    if resp.get("requiredInitialBond"):
+        click.echo(
+            f"Required initial bond: {resp['requiredInitialBond']}",
+            err=True,
+        )
+    if resp.get("requiredUpgradePendingBond"):
+        click.echo(
+            "Required upgrade pending bond: "
+            f"{resp['requiredUpgradePendingBond']}",
+            err=True,
+        )
+    if bonded and resp.get("contractArgs"):
+        click.echo("\nBond contract args:", err=True)
+        click.echo(json.dumps(resp["contractArgs"], indent=2), err=True)
 
 
 @pack_cli.command(name="search", help="Search packs in the registry.")
@@ -650,6 +692,8 @@ def install_cmd(
     lock_path.write_text(json.dumps(lock, indent=2, default=str) + "\n")
 
     receipt_status = "skipped"
+    installation_id = None
+    heartbeat_token = None
     if intent_payload and intent_signature:
         try:
             receipt_resp = client.submit_install_receipt(
@@ -661,9 +705,17 @@ def install_cmd(
                 extracted_files=len(extracted),
             )
             receipt_status = str(receipt_resp.get("status", "recorded"))
+            installation_id = receipt_resp.get("installation_id")
+            heartbeat_token = receipt_resp.get("heartbeat_token")
         except PacksApiError as exc:
             warnings.append(f"Could not submit install receipt: {exc}")
             receipt_status = "error"
+
+    packs_map[slug]["installation_id"] = installation_id
+    packs_map[slug]["heartbeat_token"] = heartbeat_token
+    lock["generatedAt"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    lock["packs"] = packs_map
+    lock_path.write_text(json.dumps(lock, indent=2, default=str) + "\n")
 
     _echo_json(
         {
@@ -679,12 +731,69 @@ def install_cmd(
                 "install_intent_id": intent_payload.get("intent_id")
                 if intent_payload
                 else None,
+                "installation_id": installation_id,
+                "heartbeat_enabled": bool(installation_id and heartbeat_token),
                 "verified_install": receipt_status in {"recorded", "duplicate"},
                 "install_receipt_status": receipt_status,
                 "warnings": warnings,
             },
         }
     )
+
+
+@pack_cli.command(
+    name="heartbeat-install",
+    help="Refresh the active-install heartbeat for an installed pack.",
+)
+@click.option("--slug", required=True, help="Pack slug.")
+@click.option(
+    "--dir",
+    "install_dir",
+    default=".wayfinder/packs",
+    show_default=True,
+    help="Base install directory used during install.",
+)
+@click.option("--status", default="active", show_default=True)
+@click.option("--api-url", "api_url", default=None, help="Override Packs API base URL.")
+def heartbeat_install_cmd(
+    slug: str,
+    install_dir: str,
+    status: str,
+    api_url: str | None,
+) -> None:
+    base = Path(install_dir).expanduser()
+    lock_dir = base.parent if base.name == "packs" else base
+    lock_path = lock_dir / "packs.lock.json"
+    if not lock_path.exists():
+        raise click.ClickException(f"Lockfile not found: {lock_path}")
+
+    try:
+        lock = json.loads(lock_path.read_text()) or {}
+    except Exception as exc:
+        raise click.ClickException(f"Failed to read lockfile: {lock_path}") from exc
+    packs_map = lock.get("packs") if isinstance(lock, dict) else None
+    if not isinstance(packs_map, dict) or slug not in packs_map:
+        raise click.ClickException(f"Pack not found in lockfile: {slug}")
+
+    entry = packs_map.get(slug) or {}
+    installation_id = str(entry.get("installation_id") or "").strip()
+    heartbeat_token = str(entry.get("heartbeat_token") or "").strip()
+    if not installation_id or not heartbeat_token:
+        raise click.ClickException(
+            "This install does not have heartbeat credentials. Reinstall the pack first."
+        )
+
+    client = PacksApiClient(api_base_url=api_url)
+    try:
+        resp = client.submit_install_heartbeat(
+            installation_id=installation_id,
+            heartbeat_token=heartbeat_token,
+            status=status,
+        )
+    except PacksApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": resp})
 
 
 @pack_cli.group(name="signal", help="Emit and manage pack signals.")
