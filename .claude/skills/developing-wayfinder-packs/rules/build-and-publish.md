@@ -1,5 +1,20 @@
 # Build + Publish
 
+## Scaffold a new pack
+
+Use `init` before any of the `--path`-based pack commands:
+
+```bash
+poetry run wayfinder pack init my-pack --kind monitor --applet --dir examples/packs
+```
+
+This creates `examples/packs/my-pack/`.
+
+Important:
+- `pack init` uses `--dir` for the base directory, not `--path`.
+- The pack slug is the last path segment that gets created under `--dir`.
+- After scaffolding, change into the new pack directory and use `--path .` for the rest of the workflow.
+
 ## Build a bundle
 
 From your pack directory (must contain `wfpack.yaml`):

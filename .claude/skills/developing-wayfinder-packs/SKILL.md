@@ -17,6 +17,8 @@ Use this skill when you are:
 
 ## How to use
 
+- To scaffold a new pack, start with `poetry run wayfinder pack init <slug> --dir <base-dir>`.
+- `pack init` uses `--dir`, while the later pack commands (`fmt`, `doctor`, `render-skill`, `build`, `publish`) use `--path`.
 - [rules/manifest.md](rules/manifest.md) - `wfpack.yaml` schema + required fields for MVP
 - [rules/applet.md](rules/applet.md) - Static applet requirements + build output expectations
 - [rules/build-and-publish.md](rules/build-and-publish.md) - `wayfinder pack build/publish` + required config/env vars

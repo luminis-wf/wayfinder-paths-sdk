@@ -78,6 +78,8 @@ def test_pack_publish_uploads_rendered_skill_exports_and_bond_metadata(
     assert call["owner_wallet"] == "0x1234567890AbcdEF1234567890aBcdef12345678"
     assert call["bonded"] is True
     assert call["risk_tier"] == "interactive"
+    assert call["source_path"] is not None
+    assert Path(call["source_path"]).name == "source.zip"
 
     exports_manifest = call["exports_manifest"]
     skill_exports = call["skill_exports"]
@@ -100,6 +102,34 @@ def test_pack_publish_uploads_rendered_skill_exports_and_bond_metadata(
     assert "Required initial bond: 1000" in result.output
     assert "Required upgrade pending bond: 1000" in result.output
     assert "Bond contract args:" in result.output
+
+
+def test_pack_build_is_deterministic(tmp_path: Path):
+    pack_dir = tmp_path / "deterministic-pack"
+    init_pack(
+        pack_dir=pack_dir,
+        slug="deterministic-pack",
+        primary_kind="monitor",
+        with_applet=False,
+        with_skill=True,
+    )
+
+    first = PackBuilder.build(
+        pack_dir=pack_dir,
+        out_path=pack_dir / "dist" / "bundle-a.zip",
+    )
+    second = PackBuilder.build(
+        pack_dir=pack_dir,
+        out_path=pack_dir / "dist" / "bundle-b.zip",
+    )
+    source_archive = PackBuilder.build_source_archive(
+        pack_dir=pack_dir,
+        out_path=pack_dir / "dist" / "source.zip",
+    )
+
+    assert first.bundle_sha256 == second.bundle_sha256
+    assert first.bundle_path.read_bytes() == second.bundle_path.read_bytes()
+    assert source_archive.exists()
 
 
 def test_pack_publish_requires_owner_wallet_for_bonded(tmp_path: Path):

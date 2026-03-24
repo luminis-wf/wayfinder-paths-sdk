@@ -399,6 +399,12 @@ def publish_cmd(
     except PackBuildError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    resolved_source_path = Path(source_path) if source_path else built.bundle_path.parent / "source.zip"
+    try:
+        PackBuilder.build_source_archive(pack_dir=pack_dir, out_path=resolved_source_path)
+    except PackBuildError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     exports_manifest, skill_exports = _collect_skill_export_uploads(
         render_report,
         doctor_report,
@@ -407,7 +413,7 @@ def publish_cmd(
     try:
         resp = client.publish(
             bundle_path=built.bundle_path,
-            source_path=Path(source_path) if source_path else None,
+            source_path=resolved_source_path,
             exports_manifest=exports_manifest,
             skill_exports=skill_exports,
             owner_wallet=owner_wallet,
