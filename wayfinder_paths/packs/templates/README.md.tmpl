@@ -21,6 +21,15 @@ wayfinder pack build --path . --out dist/bundle.zip
 ## Publish
 
 ```bash
-export WAYFINDER_PACKS_API_URL="http://localhost:8000"
-wayfinder pack publish --path . --owner-wallet 0xYourWallet
+export WAYFINDER_PACKS_API_URL="https://strategies-dev.wayfinder.ai"
+export WAYFINDER_API_KEY="wk_..."
+wayfinder pack publish --path .
 ```
+
+For bonded publishes:
+
+```bash
+wayfinder pack publish --path . --bonded --owner-wallet 0xYourWallet --risk-tier execution
+```
+
+`wayfinder pack publish` builds `bundle.zip` and `source.zip`, generates thin skill exports when this pack has a skill, requests signed upload URLs from the Packs API, uploads artifacts directly to storage, then finalizes the submission and prints a manage URL plus the next required action.
