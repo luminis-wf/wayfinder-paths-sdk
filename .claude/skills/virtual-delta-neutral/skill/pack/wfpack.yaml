@@ -1,0 +1,43 @@
+schema_version: '0.1'
+slug: virtual-delta-neutral
+name: VIRTUAL Delta-Neutral Strategy
+version: 0.1.13
+summary: 'Delta-neutral strategy: Moonwell VIRTUAL supply + short perp vs USDC yield.
+  Anti-churn with 6h confirmation and 2-day cooldown.'
+primary_kind: strategy
+tags:
+- strategy
+- virtual
+- delta-neutral
+- moonwell
+- hyperliquid
+components:
+- id: data-generator
+  kind: script
+  path: scripts/generate_data.py
+- id: regime-classifier
+  kind: script
+  path: scripts/classify_regime.py
+applet:
+  build_dir: applet/dist
+  manifest: applet/applet.manifest.json
+skill:
+  enabled: true
+  source: generated
+  name: virtual-delta-neutral
+  description: 'Execute a VIRTUAL delta-neutral strategy: supply VIRTUAL on Moonwell,
+    short VIRTUAL perp on Hyperliquid, with regime switching to USDC when spreads
+    compress.'
+  instructions: skill/instructions.md
+  runtime:
+    mode: thin
+    package: wayfinder-paths
+    version: 0.8.0
+    python: '>=3.12,<3.13'
+    component: regime-classifier
+    bootstrap: uv
+    fallback_bootstrap: pipx
+    prefer_existing_runtime: true
+    require_api_key: false
+    api_key_env: WAYFINDER_API_KEY
+    config_path_env: WAYFINDER_CONFIG_PATH
