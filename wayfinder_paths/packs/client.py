@@ -369,6 +369,24 @@ class PacksApiClient:
             )
         return resp.json()
 
+    def submit_batch_install_heartbeats(
+        self,
+        *,
+        heartbeats: list[dict[str, Any]],
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        url = f"{self.base_url}/api/v1/packs/installations/heartbeat-batch/"
+        body: dict[str, Any] = {"heartbeats": heartbeats}
+        if source:
+            body["source"] = source
+
+        resp = self._client.post(url, json=body, headers=self._headers())
+        if resp.status_code >= 400:
+            raise PacksApiError(
+                f"Batch install heartbeat failed ({resp.status_code}): {resp.text}"
+            )
+        return resp.json()
+
     def emit_signal(
         self,
         *,
