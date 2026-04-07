@@ -9,13 +9,28 @@ Usage:
   poetry run python -m wayfinder_paths.mcp.cli discover --kind strategies
 """
 
+import sys
+
 from wayfinder_paths.mcp.cli_builder import build_cli
 from wayfinder_paths.mcp.server import mcp
 from wayfinder_paths.packs.cli import pack_cli
+from wayfinder_paths.packs.heartbeat import maybe_heartbeat_installed_packs
 from wayfinder_paths.runner.cli import runner_cli
 
 
+def _first_command(argv: list[str]) -> str | None:
+    for arg in argv:
+        if not arg or arg.startswith("-"):
+            continue
+        return arg
+    return None
+
+
 def main():
+    first_command = _first_command(sys.argv[1:])
+    if first_command and first_command not in {"pack", "runner"}:
+        maybe_heartbeat_installed_packs(trigger="mcp-cli")
+
     cli = build_cli(mcp)
     cli.add_command(runner_cli)
     cli.add_command(pack_cli)
