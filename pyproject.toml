@@ -8,7 +8,7 @@ packages = [
     { include = "wayfinder_paths", from = "." },
 ]
 include = [
-    { path = "wayfinder_paths/packs/templates", format = ["sdist", "wheel"] },
+    { path = "wayfinder_paths/paths/templates", format = ["sdist", "wheel"] },
 ]
 
 [tool.poetry.dependencies]

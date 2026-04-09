@@ -98,13 +98,13 @@ def get_api_base_url() -> str:
     return "https://wayfinder.ai/api"
 
 
-def get_packs_api_base_url() -> str:
+def get_paths_api_base_url() -> str:
     system = CONFIG.get("system", {})
-    packs_url = system.get("packs_api_base_url")
-    if packs_url:
-        return str(packs_url).strip().rstrip("/")
+    paths_url = system.get("paths_api_base_url")
+    if paths_url:
+        return str(paths_url).strip().rstrip("/")
 
-    env_url = os.environ.get("WAYFINDER_PACKS_API_URL")
+    env_url = os.environ.get("WAYFINDER_PATHS_API_URL")
     if env_url:
         return str(env_url).strip().rstrip("/")
 

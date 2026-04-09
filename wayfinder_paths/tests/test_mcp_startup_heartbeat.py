@@ -26,10 +26,10 @@ def test_mcp_cli_main_triggers_heartbeat_for_resource_command(monkeypatch) -> No
     monkeypatch.setattr(mcp_cli, "build_cli", lambda _mcp: _make_fake_group())
     monkeypatch.setattr(
         mcp_cli,
-        "maybe_heartbeat_installed_packs",
+        "maybe_heartbeat_installed_paths",
         lambda **kwargs: calls.append(str(kwargs["trigger"])),
     )
-    monkeypatch.setattr(mcp_cli, "pack_cli", click.Group("pack"))
+    monkeypatch.setattr(mcp_cli, "path_cli", click.Group("path"))
     monkeypatch.setattr(mcp_cli, "runner_cli", click.Group("runner"))
     monkeypatch.setattr(
         mcp_cli.sys, "argv", ["wayfinder", "resource", "wayfinder://foo"]
@@ -42,27 +42,27 @@ def test_mcp_cli_main_triggers_heartbeat_for_resource_command(monkeypatch) -> No
     assert calls == ["mcp-cli"]
 
 
-def test_mcp_cli_main_skips_heartbeat_for_pack_command(monkeypatch) -> None:
+def test_mcp_cli_main_skips_heartbeat_for_path_command(monkeypatch) -> None:
     calls: list[str] = []
 
     monkeypatch.setattr(mcp_cli, "build_cli", lambda _mcp: _make_fake_group())
     monkeypatch.setattr(
         mcp_cli,
-        "maybe_heartbeat_installed_packs",
+        "maybe_heartbeat_installed_paths",
         lambda **kwargs: calls.append(str(kwargs["trigger"])),
     )
 
-    @click.group(name="pack")
-    def fake_pack() -> None:
+    @click.group(name="path")
+    def fake_path() -> None:
         pass
 
-    @fake_pack.command(name="version")
+    @fake_path.command(name="version")
     def version_cmd() -> None:
         pass
 
-    monkeypatch.setattr(mcp_cli, "pack_cli", fake_pack)
+    monkeypatch.setattr(mcp_cli, "path_cli", fake_path)
     monkeypatch.setattr(mcp_cli, "runner_cli", click.Group("runner"))
-    monkeypatch.setattr(mcp_cli.sys, "argv", ["wayfinder", "pack", "version"])
+    monkeypatch.setattr(mcp_cli.sys, "argv", ["wayfinder", "path", "version"])
 
     with pytest.raises(SystemExit) as exc:
         mcp_cli.main()
@@ -76,7 +76,7 @@ def test_mcp_server_main_triggers_heartbeat_once(monkeypatch) -> None:
 
     monkeypatch.setattr(
         mcp_server,
-        "maybe_heartbeat_installed_packs",
+        "maybe_heartbeat_installed_paths",
         lambda **kwargs: calls.append(str(kwargs["trigger"])),
     )
     monkeypatch.setattr(mcp_server.mcp, "run", lambda: None)
