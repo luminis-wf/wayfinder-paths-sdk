@@ -1,0 +1,1312 @@
+from __future__ import annotations
+
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import UTC, datetime
+from importlib import metadata as importlib_metadata
+from pathlib import Path
+from typing import Any
+from zipfile import ZipFile
+
+import click
+
+from wayfinder_paths.paths.builder import PathBuilder, PathBuildError, _sha256_file
+from wayfinder_paths.paths.client import PathsApiClient, PathsApiError
+from wayfinder_paths.paths.doctor import PathDoctorError, PathDoctorReport, run_doctor
+from wayfinder_paths.paths.formatter import PathFormatError, format_path
+from wayfinder_paths.paths.hooks import PathHooksError, install_path_hooks
+from wayfinder_paths.paths.manifest import (
+    PathManifest,
+    PathManifestError,
+)
+from wayfinder_paths.paths.preview import (
+    PathPreviewError,
+    inspect_preview_path,
+    preview_path,
+)
+from wayfinder_paths.paths.renderer import (
+    PathSkillRenderError,
+    PathSkillRenderReport,
+    render_skill_exports,
+)
+from wayfinder_paths.paths.scaffold import PathScaffoldError, init_path, slugify
+
+_INSTALL_DIRNAME = "paths"
+_LEGACY_INSTALL_DIRNAME = "packs"
+_LOCKFILE_NAME = "paths.lock.json"
+_LEGACY_LOCKFILE_NAME = "packs.lock.json"
+
+
+def _echo_json(data: Any) -> None:
+    click.echo(json.dumps(data, indent=2, default=str))
+
+
+def _path_install_venue(*, runtime: str) -> str:
+    return str(os.environ.get("WAYFINDER_PATHS_INSTALL_VENUE") or runtime).strip()
+
+
+def _canonical_install_root(install_dir: str | Path) -> Path:
+    base = Path(install_dir).expanduser()
+    if base.name == _LEGACY_INSTALL_DIRNAME:
+        return base.with_name(_INSTALL_DIRNAME)
+    return base
+
+
+def _state_dir_for_install_root(install_root: Path) -> Path:
+    if install_root.name in {_INSTALL_DIRNAME, _LEGACY_INSTALL_DIRNAME}:
+        return install_root.parent
+    return install_root
+
+
+def _load_install_lock(state_dir: Path) -> tuple[dict[str, Any], Path]:
+    lock_path = state_dir / _LOCKFILE_NAME
+    source_path = lock_path
+    if not source_path.exists():
+        source_path = state_dir / _LEGACY_LOCKFILE_NAME
+
+    raw: dict[str, Any] = {}
+    if source_path.exists():
+        try:
+            parsed = json.loads(source_path.read_text()) or {}
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            raw = parsed
+
+    paths = raw.get("paths")
+    if not isinstance(paths, dict):
+        legacy_paths = raw.get("packs")
+        paths = legacy_paths if isinstance(legacy_paths, dict) else {}
+
+    normalized = {
+        key: value for key, value in raw.items() if key not in {"packs", "paths"}
+    }
+    normalized["schemaVersion"] = raw.get("schemaVersion") or "0.1"
+    normalized["paths"] = paths
+    return normalized, lock_path
+
+
+def _write_install_lock(lock_path: Path, lock: dict[str, Any]) -> None:
+    normalized = {key: value for key, value in lock.items() if key != "packs"}
+    normalized["schemaVersion"] = normalized.get("schemaVersion") or "0.1"
+    normalized["generatedAt"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    normalized["paths"] = normalized.get("paths") or {}
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps(normalized, indent=2, default=str) + "\n")
+
+
+def _doctor_result_payload(report: PathDoctorReport) -> dict[str, Any]:
+    return {
+        "slug": report.slug,
+        "version": report.version,
+        "primary_kind": report.primary_kind,
+        "errors": [{"message": i.message, "path": i.path} for i in report.errors],
+        "warnings": [{"message": i.message, "path": i.path} for i in report.warnings],
+        "created_files": report.created_files,
+    }
+
+
+def _raise_for_doctor_errors(report: PathDoctorReport) -> None:
+    if report.ok:
+        return
+    details = "\n".join(
+        f"- {issue.message}" + (f" ({issue.path})" if issue.path else "")
+        for issue in report.errors
+    )
+    raise click.ClickException(f"Path doctor found errors\n{details}")
+
+
+def _skill_export_warning_strings(report: PathDoctorReport) -> list[str]:
+    return [
+        issue.message + (f" ({issue.path})" if issue.path else "")
+        for issue in report.warnings
+    ]
+
+
+def _zip_skill_export_dir(export_dir: Path) -> bytes:
+    buf = io.BytesIO()
+    with ZipFile(buf, "w") as zf:
+        for path in sorted(export_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            arcname = Path("skill") / path.relative_to(export_dir)
+            zf.write(path, arcname.as_posix())
+    return buf.getvalue()
+
+
+def _collect_skill_export_uploads(
+    render_report: PathSkillRenderReport,
+    doctor_report: PathDoctorReport,
+) -> tuple[dict[str, Any] | None, dict[str, bytes]]:
+    if not render_report.rendered_hosts:
+        return None, {}
+
+    skill_exports: dict[str, bytes] = {}
+    exports_detail: dict[str, Any] = {}
+    for host in render_report.rendered_hosts:
+        info = render_report.exports.get(host)
+        if info is None:
+            raise click.ClickException(
+                f"Missing rendered export metadata for host '{host}'"
+            )
+        skill_exports[host] = _zip_skill_export_dir(info.export_dir)
+        exports_detail[host] = {
+            "filename": info.filename,
+            "mode": info.mode,
+            "runtime": info.runtime_manifest,
+            "export": info.export_manifest,
+        }
+
+    exports_manifest = {
+        "targets": render_report.rendered_hosts,
+        "doctor": {
+            "status": "warn" if doctor_report.warnings else "ok",
+            "warnings": _skill_export_warning_strings(doctor_report),
+        },
+        "exports": exports_detail,
+    }
+    return exports_manifest, skill_exports
+
+
+def _load_applet_meta(path_dir: Path, manifest: PathManifest) -> dict[str, Any]:
+    if manifest.applet is None:
+        return {}
+    applet_manifest_path = path_dir / manifest.applet.manifest_path
+    if not applet_manifest_path.exists():
+        return {}
+    try:
+        parsed = json.loads(applet_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        "build_dir": manifest.applet.build_dir,
+        "applet_manifest": manifest.applet.manifest_path,
+        **parsed,
+    }
+
+
+def _prepare_path_for_build(
+    path_dir: Path,
+) -> tuple[PathDoctorReport, PathSkillRenderReport]:
+    try:
+        doctor_report = run_doctor(path_dir=path_dir, fix=False, overwrite=False)
+    except PathDoctorError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _raise_for_doctor_errors(doctor_report)
+
+    try:
+        render_report = render_skill_exports(path_dir=path_dir)
+    except PathSkillRenderError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    return doctor_report, render_report
+
+
+def _load_path_manifest(path_dir: Path) -> PathManifest:
+    try:
+        return PathManifest.load((path_dir / "wfpath.yaml").resolve())
+    except PathManifestError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _resolve_component_execution_target(
+    manifest: PathManifest,
+    *,
+    component_id: str | None = None,
+) -> tuple[str, str]:
+    component = manifest.resolve_component(component_id)
+    component_id_value = str(component.get("id") or "").strip() or "main"
+    component_path = str(component.get("path") or "").strip()
+    if not component_path:
+        raise click.ClickException(f"Component '{component_id_value}' is missing path")
+    return component_id_value, component_path
+
+
+def _run_path_component(
+    *,
+    path_dir: Path,
+    component_id: str | None,
+    args: tuple[str, ...] | list[str],
+) -> int:
+    manifest = _load_path_manifest(path_dir)
+    resolved_component_id, component_path = _resolve_component_execution_target(
+        manifest,
+        component_id=component_id,
+    )
+    target = (path_dir / component_path).resolve()
+    if not target.exists():
+        raise click.ClickException(
+            f"Component path not found for '{resolved_component_id}': {target}"
+        )
+
+    env = os.environ.copy()
+    current_pythonpath = env.get("PYTHONPATH", "").strip()
+    env["PYTHONPATH"] = (
+        str(path_dir)
+        if not current_pythonpath
+        else str(path_dir) + os.pathsep + current_pythonpath
+    )
+    cmd = [sys.executable, str(target), *list(args)]
+    return subprocess.call(cmd, cwd=str(path_dir), env=env)
+
+
+def _export_single_skill(
+    *,
+    path_dir: Path,
+    host: str,
+) -> tuple[PathDoctorReport, PathSkillRenderReport]:
+    try:
+        doctor_report = run_doctor(path_dir=path_dir, fix=False, overwrite=False)
+    except PathDoctorError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _raise_for_doctor_errors(doctor_report)
+
+    try:
+        render_report = render_skill_exports(path_dir=path_dir, hosts=[host])
+    except PathSkillRenderError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return doctor_report, render_report
+
+
+def _copy_export_tree(src: Path, dest: Path) -> None:
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest)
+
+
+def _activate_destination(host: str, scope: str, *, cwd: Path) -> Path:
+    if host == "claude":
+        if scope == "project":
+            return cwd / ".claude" / "skills"
+        if scope == "personal":
+            return Path.home() / ".claude" / "skills"
+    elif host == "codex":
+        if scope == "repo":
+            return cwd / ".agents" / "skills"
+        if scope == "user":
+            return Path.home() / ".agents" / "skills"
+        if scope == "admin":
+            return Path("/etc/codex/skills")
+    elif host == "openclaw":
+        if scope == "workspace":
+            return cwd / "skills"
+        if scope == "shared":
+            return Path.home() / ".openclaw" / "skills"
+
+    raise click.ClickException(f"Unsupported host/scope combination: {host}/{scope}")
+
+
+@click.group(name="path", help="Build, publish, and emit signals for Paths.")
+def path_cli() -> None:
+    pass
+
+
+@path_cli.command(
+    name="init", help="Scaffold a new path folder (wfpath.yaml + optional applet)."
+)
+@click.argument("slug")
+@click.option(
+    "--dir",
+    "base_dir",
+    default=".",
+    show_default=True,
+    help="Base directory to create the path in.",
+)
+@click.option("--name", default=None, help="Path display name (defaults from slug).")
+@click.option("--version", default="0.1.0", show_default=True)
+@click.option("--summary", default="", show_default=True)
+@click.option(
+    "--kind",
+    "primary_kind",
+    default="bundle",
+    show_default=True,
+    type=click.Choice(
+        ["bundle", "monitor", "strategy", "script", "contract", "dashboard", "policy"],
+        case_sensitive=False,
+    ),
+)
+@click.option("--tag", "tags", multiple=True, help="Tag (repeatable).")
+@click.option("--applet/--no-applet", default=False, show_default=True)
+@click.option("--skill/--no-skill", default=True, show_default=True)
+@click.option(
+    "--overwrite", is_flag=True, help="Overwrite scaffolded files if they exist."
+)
+def init_cmd(
+    slug: str,
+    base_dir: str,
+    name: str | None,
+    version: str,
+    summary: str,
+    primary_kind: str,
+    tags: tuple[str, ...],
+    applet: bool,
+    skill: bool,
+    overwrite: bool,
+) -> None:
+    safe_slug = slugify(slug)
+    path_dir = Path(base_dir).expanduser() / safe_slug
+    try:
+        result = init_path(
+            path_dir=path_dir,
+            slug=safe_slug,
+            name=name,
+            version=version,
+            summary=summary,
+            primary_kind=primary_kind.lower(),
+            tags=list(tags) if tags else None,
+            with_applet=applet,
+            with_skill=skill,
+            overwrite=overwrite,
+        )
+    except PathScaffoldError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "path_dir": str(result.path_dir),
+                "manifest": str(result.manifest_path),
+                "created": [
+                    str(p.relative_to(result.path_dir)) for p in result.created_files
+                ],
+                "overwritten": [
+                    str(p.relative_to(result.path_dir))
+                    for p in result.overwritten_files
+                ],
+                "skipped": [
+                    str(p.relative_to(result.path_dir)) for p in result.skipped_files
+                ],
+            },
+        }
+    )
+
+
+@path_cli.command(
+    name="doctor", help="Validate a path folder and optionally fix common issues."
+)
+@click.option("--path", "path_dir", default=".", show_default=True)
+@click.option(
+    "--check",
+    is_flag=True,
+    help="Validation-only mode. Equivalent to the default behavior.",
+)
+@click.option("--fix", is_flag=True, help="Create missing recommended files.")
+@click.option(
+    "--overwrite", is_flag=True, help="Overwrite generated files when using --fix."
+)
+def doctor_cmd(path_dir: str, check: bool, fix: bool, overwrite: bool) -> None:
+    if check and fix:
+        raise click.ClickException("--check cannot be used together with --fix")
+
+    try:
+        report = run_doctor(path_dir=Path(path_dir), fix=fix, overwrite=overwrite)
+    except PathDoctorError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": report.ok, "result": _doctor_result_payload(report)})
+    _raise_for_doctor_errors(report)
+
+
+@path_cli.command(name="fmt", help="Format path metadata and generated skill exports.")
+@click.option("--path", "path_dir", default=".", show_default=True)
+def fmt_cmd(path_dir: str) -> None:
+    try:
+        report = format_path(path_dir=Path(path_dir))
+    except PathFormatError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": {"changed_files": report.changed_files}})
+
+
+@path_cli.command(
+    name="render-skill", help="Generate host-specific skill exports under .build/."
+)
+@click.option("--path", "path_dir", default=".", show_default=True)
+def render_skill_cmd(path_dir: str) -> None:
+    try:
+        report = render_skill_exports(path_dir=Path(path_dir))
+    except PathSkillRenderError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "output_root": str(report.output_root),
+                "rendered_hosts": report.rendered_hosts,
+                "written_files": report.written_files,
+            },
+        }
+    )
+
+
+@path_cli.command(name="version", help="Print the installed wayfinder-paths version.")
+def version_cmd() -> None:
+    try:
+        click.echo(importlib_metadata.version("wayfinder-paths"))
+    except importlib_metadata.PackageNotFoundError:
+        click.echo("0.0.0")
+
+
+@path_cli.command(name="exec", help="Execute a path component from a path directory.")
+@click.option(
+    "--path-dir",
+    "path_dir",
+    required=True,
+    help="Path to the exported or local path directory.",
+)
+@click.option(
+    "--component",
+    default=None,
+    help="Component id (defaults to the runtime/default component).",
+)
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def exec_cmd(path_dir: str, component: str | None, args: tuple[str, ...]) -> None:
+    rc = _run_path_component(
+        path_dir=Path(path_dir).expanduser().resolve(),
+        component_id=component,
+        args=args,
+    )
+    raise SystemExit(rc)
+
+
+@path_cli.command(
+    name="export-skill", help="Generate a single thin skill export for one host."
+)
+@click.option("--path", "path_dir", default=".", show_default=True)
+@click.option(
+    "--host",
+    required=True,
+    type=click.Choice(
+        ["claude", "codex", "openclaw", "portable"], case_sensitive=False
+    ),
+)
+def export_skill_cmd(path_dir: str, host: str) -> None:
+    doctor_report, render_report = _export_single_skill(
+        path_dir=Path(path_dir),
+        host=host.lower(),
+    )
+    info = render_report.exports[host.lower()]
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "host": host.lower(),
+                "export_dir": str(info.export_dir),
+                "filename": info.filename,
+                "mode": info.mode,
+                "runtime": info.runtime_manifest,
+                "warnings": _skill_export_warning_strings(doctor_report),
+            },
+        }
+    )
+
+
+@path_cli.command(
+    name="activate", help="Install a rendered skill export into a host skill directory."
+)
+@click.option(
+    "--host",
+    required=True,
+    type=click.Choice(["claude", "codex", "openclaw"], case_sensitive=False),
+)
+@click.option(
+    "--scope",
+    required=True,
+    help="Host scope (e.g. project, personal, repo, user, admin, workspace, shared).",
+)
+@click.option(
+    "--path", "path_dir", default=None, help="Local path directory to render from."
+)
+@click.option(
+    "--export-path", default=None, help="Existing rendered skill export directory."
+)
+def activate_cmd(
+    host: str,
+    scope: str,
+    path_dir: str | None,
+    export_path: str | None,
+) -> None:
+    if bool(path_dir) == bool(export_path):
+        raise click.ClickException("Provide exactly one of --path or --export-path")
+
+    normalized_host = host.lower()
+    normalized_scope = scope.strip().lower()
+    source_dir: Path
+
+    if path_dir:
+        _, render_report = _export_single_skill(
+            path_dir=Path(path_dir),
+            host=normalized_host,
+        )
+        source_dir = render_report.exports[normalized_host].export_dir
+        skill_name = render_report.skill_name or source_dir.name
+    else:
+        source_dir = Path(export_path or "").expanduser().resolve()
+        if not (source_dir / "SKILL.md").exists():
+            raise click.ClickException(f"Rendered export not found: {source_dir}")
+        skill_name = source_dir.name
+
+    destination_root = _activate_destination(
+        normalized_host, normalized_scope, cwd=Path.cwd()
+    )
+    dest = destination_root / skill_name
+    _copy_export_tree(source_dir, dest)
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "host": normalized_host,
+                "scope": normalized_scope,
+                "source": str(source_dir),
+                "dest": str(dest),
+                "mode": "copy",
+            },
+        }
+    )
+
+
+@path_cli.command(
+    name="preview", help="Serve a local parent-shell preview for this path's applet."
+)
+@click.option("--path", "path_dir", default=".", show_default=True)
+@click.option(
+    "--check",
+    is_flag=True,
+    help="Validate preview prerequisites without starting local servers.",
+)
+@click.option("--parent-port", default=3333, show_default=True, type=int)
+@click.option("--applet-port", default=3334, show_default=True, type=int)
+def preview_cmd(
+    path_dir: str,
+    check: bool,
+    parent_port: int,
+    applet_port: int,
+) -> None:
+    try:
+        if check:
+            inspection = inspect_preview_path(path_dir=Path(path_dir))
+            _echo_json(
+                {
+                    "ok": True,
+                    "result": {
+                        "slug": inspection.slug,
+                        "name": inspection.name,
+                        "applet_root": str(inspection.applet_root),
+                        "entry": inspection.entry,
+                        "entry_path": str(inspection.entry_path),
+                    },
+                }
+            )
+            return
+
+        preview_path(
+            path_dir=Path(path_dir),
+            parent_port=parent_port,
+            applet_port=applet_port,
+        )
+    except PathPreviewError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@path_cli.group(name="hooks", help="Install local git hook automation for a path.")
+def hooks_group() -> None:
+    pass
+
+
+@hooks_group.command(name="install", help="Write or update .pre-commit-config.yaml.")
+@click.option("--path", "path_dir", default=".", show_default=True)
+def hooks_install_cmd(path_dir: str) -> None:
+    try:
+        report = install_path_hooks(path_dir=Path(path_dir))
+    except PathHooksError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "config_path": str(report.config_path),
+                "changed": report.changed,
+                "hooks": report.hooks,
+            },
+        }
+    )
+
+
+@path_cli.command(name="build", help="Create a bundle.zip from a path directory.")
+@click.option("--path", "path_dir", default=".", show_default=True)
+@click.option("--out", "out_path", default="dist/bundle.zip", show_default=True)
+def build_cmd(path_dir: str, out_path: str) -> None:
+    path_dir = Path(path_dir)
+    doctor_report, render_report = _prepare_path_for_build(path_dir)
+
+    try:
+        built = PathBuilder.build(path_dir=path_dir, out_path=Path(out_path))
+    except PathBuildError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "slug": built.manifest.slug,
+                "version": built.manifest.version,
+                "bundle_path": str(built.bundle_path),
+                "bundle_sha256": built.bundle_sha256,
+                "warnings": len(doctor_report.warnings),
+                "rendered_hosts": render_report.rendered_hosts,
+            },
+        }
+    )
+
+
+@path_cli.command(
+    name="publish", help="Build and publish a path bundle to the Paths API."
+)
+@click.option("--path", "path_dir", default=".", show_default=True)
+@click.option("--out", "out_path", default="dist/bundle.zip", show_default=True)
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+@click.option(
+    "--source", "source_path", default=None, help="Optional source.zip to upload."
+)
+@click.option("--bonded/--unbonded", default=False, show_default=True)
+@click.option(
+    "--owner-wallet",
+    default=None,
+    help="Owner wallet for bonded publish metadata and contract args.",
+)
+@click.option(
+    "--risk-tier",
+    default=None,
+    type=click.Choice(["read_only", "interactive", "execution"], case_sensitive=False),
+    help="Requested risk tier for bonded publish.",
+)
+def publish_cmd(
+    path_dir: str,
+    out_path: str,
+    api_url: str | None,
+    source_path: str | None,
+    bonded: bool,
+    owner_wallet: str | None,
+    risk_tier: str | None,
+) -> None:
+    path_dir = Path(path_dir)
+    doctor_report, render_report = _prepare_path_for_build(path_dir)
+
+    if bonded and not owner_wallet:
+        raise click.ClickException("--owner-wallet is required with --bonded")
+
+    try:
+        built = PathBuilder.build(path_dir=path_dir, out_path=Path(out_path))
+    except PathBuildError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    resolved_source_path = (
+        Path(source_path) if source_path else built.bundle_path.parent / "source.zip"
+    )
+    try:
+        PathBuilder.build_source_archive(
+            path_dir=path_dir, out_path=resolved_source_path
+        )
+    except PathBuildError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    exports_manifest, skill_exports = _collect_skill_export_uploads(
+        render_report,
+        doctor_report,
+    )
+    client = PathsApiClient(api_base_url=api_url)
+    try:
+        resp = client.publish(
+            bundle_path=built.bundle_path,
+            source_path=resolved_source_path,
+            exports_manifest=exports_manifest,
+            skill_exports=skill_exports,
+            manifest=built.manifest.raw,
+            applet_meta=_load_applet_meta(path_dir, built.manifest),
+            has_skill=bool(
+                built.manifest.skill or (path_dir / "skill" / "SKILL.md").exists()
+            ),
+            owner_wallet=owner_wallet,
+            bonded=bonded,
+            risk_tier=risk_tier.lower() if risk_tier else None,
+        )
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": resp})
+    if resp.get("ownerLinkRequired"):
+        manage_url = resp.get("manageUrl", "")
+        click.echo(f"\nLink owner wallet and bond at: {manage_url}", err=True)
+    elif resp.get("manageUrl"):
+        click.echo(f"\nManage at: {resp['manageUrl']}", err=True)
+    if resp.get("effectiveRiskTier"):
+        click.echo(
+            f"Effective risk tier: {resp['effectiveRiskTier']}",
+            err=True,
+        )
+    if resp.get("requiredInitialBond"):
+        click.echo(
+            f"Required initial bond: {resp['requiredInitialBond']}",
+            err=True,
+        )
+    if resp.get("requiredUpgradePendingBond"):
+        click.echo(
+            f"Required upgrade pending bond: {resp['requiredUpgradePendingBond']}",
+            err=True,
+        )
+    if resp.get("reservationExpiresAt"):
+        click.echo(
+            f"Temporary slug reservation expires at: {resp['reservationExpiresAt']}",
+            err=True,
+        )
+    if resp.get("slugPermanent") is True:
+        click.echo("Slug reservation is permanent.", err=True)
+    elif resp.get("slugPermanent") is False:
+        click.echo(
+            "Slug reservation is temporary until approval/publication.", err=True
+        )
+
+
+@path_cli.command(name="search", help="Search paths in the registry.")
+@click.argument("query", required=False, default="")
+@click.option("--tag", default=None, help="Filter by tag.")
+@click.option("--owner-wallet", default=None, help="Filter by owner wallet.")
+@click.option("--limit", default=25, show_default=True, type=int)
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def search_cmd(
+    query: str,
+    tag: str | None,
+    owner_wallet: str | None,
+    limit: int,
+    api_url: str | None,
+) -> None:
+    q = (query or "").strip().lower()
+    limit = max(1, min(int(limit or 25), 200))
+
+    client = PathsApiClient(api_base_url=api_url)
+    try:
+        paths = client.list_paths(owner_wallet=owner_wallet, tag=tag)
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if q:
+
+        def matches(p: dict[str, Any]) -> bool:
+            blob = " ".join(
+                [
+                    str(p.get("slug", "")),
+                    str(p.get("name", "")),
+                    str(p.get("summary", "")),
+                    " ".join([str(t) for t in (p.get("tags") or []) if t]),
+                ]
+            ).lower()
+            return q in blob
+
+        paths = [p for p in paths if matches(p)]
+
+    _echo_json(
+        {
+            "ok": True,
+            "result": {"count": len(paths), "paths": paths[:limit]},
+        }
+    )
+
+
+@path_cli.command(name="info", help="Fetch path metadata (path + versions).")
+@click.option("--slug", required=True, help="Path slug.")
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def info_cmd(slug: str, api_url: str | None) -> None:
+    client = PathsApiClient(api_base_url=api_url)
+    try:
+        data = client.get_path(slug=slug)
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _echo_json({"ok": True, "result": data})
+
+
+@path_cli.command(name="fork", help="Fork a path in the registry.")
+@click.option("--slug", required=True, help="Parent path slug.")
+@click.option(
+    "--version", "path_version", default=None, help="Path version (defaults to latest)."
+)
+@click.option("--new-slug", default=None, help="Slug for the fork (optional).")
+@click.option("--name", default=None, help="Name for the fork (optional).")
+@click.option("--summary", default=None, help="Summary for the fork (optional).")
+@click.option(
+    "--owner-wallet", default=None, help="Owner wallet for the fork (optional)."
+)
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def fork_cmd(
+    slug: str,
+    path_version: str | None,
+    new_slug: str | None,
+    name: str | None,
+    summary: str | None,
+    owner_wallet: str | None,
+    api_url: str | None,
+) -> None:
+    client = PathsApiClient(api_base_url=api_url)
+    try:
+        resp = client.fork_path(
+            slug=slug,
+            version=path_version,
+            new_slug=new_slug,
+            name=name,
+            summary=summary,
+            owner_wallet=owner_wallet,
+        )
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": resp})
+
+
+def _safe_extract_zip(zip_path: Path, *, dest_dir: Path) -> list[str]:
+    extracted: list[str] = []
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            name = info.filename
+            if not name or name.endswith("/"):
+                continue
+            rel = Path(name)
+            if rel.is_absolute() or ".." in rel.parts:
+                continue
+            target = (dest_dir / rel).resolve()
+            if (
+                dest_dir.resolve() not in target.parents
+                and target != dest_dir.resolve()
+            ):
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, target.open("wb") as out:
+                out.write(src.read())
+            extracted.append(rel.as_posix())
+    extracted.sort()
+    return extracted
+
+
+def _install_path(
+    *,
+    slug: str,
+    path_version: str | None,
+    install_dir: str,
+    force: bool,
+    no_verify: bool,
+    api_url: str | None,
+) -> None:
+    client = PathsApiClient(api_base_url=api_url)
+    venue = _path_install_venue(runtime="sdk-cli")
+    try:
+        detail = client.get_path(slug=slug)
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    path_obj = detail.get("path") if isinstance(detail, dict) else None
+    versions = detail.get("versions") if isinstance(detail, dict) else None
+    if not isinstance(path_obj, dict) or not isinstance(versions, list) or not versions:
+        raise click.ClickException("Path not found or has no versions")
+
+    desired_version = (
+        path_version or str(path_obj.get("latest_version") or "")
+    ).strip()
+    if not desired_version:
+        desired_version = str(versions[0].get("version") or "").strip()
+    if not desired_version:
+        raise click.ClickException("Path has no published versions")
+
+    version_obj = next(
+        (v for v in versions if str(v.get("version") or "").strip() == desired_version),
+        None,
+    )
+    if not isinstance(version_obj, dict):
+        try:
+            version_detail = client.get_path_version(slug=slug, version=desired_version)
+        except PathsApiError as exc:
+            raise click.ClickException(str(exc)) from exc
+        version_obj = (
+            version_detail.get("version") if isinstance(version_detail, dict) else None
+        )
+
+    if not isinstance(version_obj, dict):
+        raise click.ClickException(f"Version not found: {desired_version}")
+
+    expected_sha = str(version_obj.get("bundle_sha256") or "").strip()
+    if not expected_sha and not no_verify:
+        raise click.ClickException("Version is missing bundle_sha256 (cannot verify)")
+
+    base = _canonical_install_root(install_dir)
+    state_dir = _state_dir_for_install_root(base)
+    dest = base / slug / desired_version
+    bundle_path = dest / "bundle.zip"
+
+    intent_payload: dict[str, Any] | None = None
+    intent_signature = ""
+    warnings: list[str] = []
+
+    if dest.exists() and any(dest.iterdir()) and not force:
+        raise click.ClickException(f"Destination already exists (use --force): {dest}")
+
+    try:
+        intent_resp = client.create_install_intent(
+            slug=slug,
+            version=desired_version,
+            runtime="sdk-cli",
+            venue=venue,
+            install_target=str(dest),
+        )
+        payload = intent_resp.get("intent")
+        signature = intent_resp.get("signature")
+        if isinstance(payload, dict) and isinstance(signature, str) and signature:
+            intent_payload = payload
+            intent_signature = signature
+    except PathsApiError as exc:
+        warnings.append(f"Could not create install intent: {exc}")
+
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        client.download_bundle(slug=slug, version=desired_version, out_path=bundle_path)
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    actual_sha = _sha256_file(bundle_path)
+    if not no_verify and expected_sha and actual_sha.lower() != expected_sha.lower():
+        raise click.ClickException(
+            f"Bundle SHA-256 mismatch (expected {expected_sha}, got {actual_sha})"
+        )
+
+    extracted = _safe_extract_zip(bundle_path, dest_dir=dest)
+
+    lock, lock_path = _load_install_lock(state_dir)
+
+    paths_map = lock.get("paths")
+    if not isinstance(paths_map, dict):
+        paths_map = {}
+    paths_map[slug] = {
+        "version": desired_version,
+        "bundle_sha256": actual_sha,
+        "venue": venue,
+        "installed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "path": str(dest),
+    }
+    lock["paths"] = paths_map
+    _write_install_lock(lock_path, lock)
+
+    receipt_status = "skipped"
+    installation_id = None
+    heartbeat_token = None
+    if intent_payload and intent_signature:
+        try:
+            receipt_resp = client.submit_install_receipt(
+                slug=slug,
+                intent=intent_payload,
+                signature=intent_signature,
+                runtime="sdk-cli",
+                venue=venue,
+                install_path=str(dest),
+                extracted_files=len(extracted),
+            )
+            receipt_status = str(receipt_resp.get("status", "recorded"))
+            installation_id = receipt_resp.get("installation_id")
+            heartbeat_token = receipt_resp.get("heartbeat_token")
+        except PathsApiError as exc:
+            warnings.append(f"Could not submit install receipt: {exc}")
+            receipt_status = "error"
+
+    paths_map[slug]["installation_id"] = installation_id
+    paths_map[slug]["heartbeat_token"] = heartbeat_token
+    lock["paths"] = paths_map
+    _write_install_lock(lock_path, lock)
+
+    _echo_json(
+        {
+            "ok": True,
+            "result": {
+                "slug": slug,
+                "version": desired_version,
+                "bundle_path": str(bundle_path),
+                "bundle_sha256": actual_sha,
+                "dest": str(dest),
+                "extracted_files": len(extracted),
+                "lockfile": str(lock_path),
+                "install_intent_id": intent_payload.get("intent_id")
+                if intent_payload
+                else None,
+                "installation_id": installation_id,
+                "heartbeat_enabled": bool(installation_id and heartbeat_token),
+                "verified_install": receipt_status in {"recorded", "duplicate"},
+                "install_receipt_status": receipt_status,
+                "warnings": warnings,
+            },
+        }
+    )
+
+
+@path_cli.command(name="install", help="Download and unpack a path bundle locally.")
+@click.option("--slug", required=True, help="Path slug.")
+@click.option(
+    "--version", "path_version", default=None, help="Path version (defaults to latest)."
+)
+@click.option(
+    "--dir",
+    "install_dir",
+    default=".wayfinder/paths",
+    show_default=True,
+    help="Base install directory.",
+)
+@click.option("--force", is_flag=True, help="Overwrite existing files.")
+@click.option("--no-verify", is_flag=True, help="Skip bundle SHA-256 verification.")
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def install_cmd(
+    slug: str,
+    path_version: str | None,
+    install_dir: str,
+    force: bool,
+    no_verify: bool,
+    api_url: str | None,
+) -> None:
+    _install_path(
+        slug=slug,
+        path_version=path_version,
+        install_dir=install_dir,
+        force=force,
+        no_verify=no_verify,
+        api_url=api_url,
+    )
+
+
+@path_cli.command(
+    name="pull", help="Alias for install: download and unpack a path locally."
+)
+@click.option("--slug", required=True, help="Path slug.")
+@click.option(
+    "--version", "path_version", default=None, help="Path version (defaults to latest)."
+)
+@click.option(
+    "--dir",
+    "install_dir",
+    default=".wayfinder/paths",
+    show_default=True,
+    help="Base install directory.",
+)
+@click.option("--force", is_flag=True, help="Overwrite existing files.")
+@click.option("--no-verify", is_flag=True, help="Skip bundle SHA-256 verification.")
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def pull_cmd(
+    slug: str,
+    path_version: str | None,
+    install_dir: str,
+    force: bool,
+    no_verify: bool,
+    api_url: str | None,
+) -> None:
+    _install_path(
+        slug=slug,
+        path_version=path_version,
+        install_dir=install_dir,
+        force=force,
+        no_verify=no_verify,
+        api_url=api_url,
+    )
+
+
+@path_cli.command(
+    name="heartbeat-install",
+    help="Refresh the active-install heartbeat for an installed path.",
+)
+@click.option("--slug", required=True, help="Path slug.")
+@click.option(
+    "--dir",
+    "install_dir",
+    default=".wayfinder/paths",
+    show_default=True,
+    help="Base install directory used during install.",
+)
+@click.option("--status", default="active", show_default=True)
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def heartbeat_install_cmd(
+    slug: str,
+    install_dir: str,
+    status: str,
+    api_url: str | None,
+) -> None:
+    base = _canonical_install_root(install_dir)
+    state_dir = _state_dir_for_install_root(base)
+    lock, lock_path = _load_install_lock(state_dir)
+    if not lock_path.exists() and not (state_dir / _LEGACY_LOCKFILE_NAME).exists():
+        raise click.ClickException(f"Lockfile not found: {lock_path}")
+
+    paths_map = lock.get("paths") if isinstance(lock, dict) else None
+    if not isinstance(paths_map, dict) or slug not in paths_map:
+        raise click.ClickException(f"Path not found in lockfile: {slug}")
+
+    entry = paths_map.get(slug) or {}
+    installation_id = str(entry.get("installation_id") or "").strip()
+    heartbeat_token = str(entry.get("heartbeat_token") or "").strip()
+    if not installation_id or not heartbeat_token:
+        raise click.ClickException(
+            "This install does not have heartbeat credentials. Reinstall the path first."
+        )
+
+    client = PathsApiClient(api_base_url=api_url)
+    try:
+        resp = client.submit_install_heartbeat(
+            installation_id=installation_id,
+            heartbeat_token=heartbeat_token,
+            status=status,
+        )
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": resp})
+
+
+@path_cli.group(name="signal", help="Emit and manage path signals.")
+def signal_group() -> None:
+    pass
+
+
+@signal_group.command(name="emit", help="Emit a public signal for a path.")
+@click.option("--slug", required=True, help="Path slug.")
+@click.option("--version", "path_version", default=None, help="Optional path version.")
+@click.option("--title", required=True)
+@click.option("--message", default="")
+@click.option(
+    "--level",
+    default="info",
+    show_default=True,
+    type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
+)
+@click.option(
+    "--metric",
+    "metrics",
+    multiple=True,
+    help="Add a metric key=value (repeatable).",
+)
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def signal_emit_cmd(
+    slug: str,
+    path_version: str | None,
+    title: str,
+    message: str,
+    level: str,
+    metrics: tuple[str, ...],
+    api_url: str | None,
+) -> None:
+    parsed_metrics: dict[str, float] = {}
+    for item in metrics:
+        if "=" not in item:
+            raise click.ClickException(f"Invalid --metric (expected key=value): {item}")
+        k, v = item.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            raise click.ClickException(f"Invalid --metric key: {item}")
+        try:
+            parsed_metrics[k] = float(v)
+        except ValueError as exc:
+            raise click.ClickException(
+                f"Invalid --metric value (expected number): {item}"
+            ) from exc
+
+    client = PathsApiClient(api_base_url=api_url)
+    try:
+        resp = client.emit_signal(
+            slug=slug,
+            path_version=path_version,
+            title=title,
+            message=message,
+            level=level.lower(),
+            metrics=parsed_metrics,
+        )
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": resp})
+
+
+@path_cli.group(
+    name="event",
+    help="Emit path runtime events (state_snapshot, decision_snapshot, receipt, heartbeat).",
+)
+def event_group() -> None:
+    pass
+
+
+@event_group.command(name="emit", help="Emit an event for a path.")
+@click.option("--slug", required=True, help="Path slug.")
+@click.option(
+    "--type", "event_type", required=True, help="Event type (e.g. state_snapshot)."
+)
+@click.option("--version", "path_version", default=None, help="Optional path version.")
+@click.option("--stream-key", default="public", show_default=True)
+@click.option(
+    "--visibility",
+    default="public",
+    show_default=True,
+    type=click.Choice(["public", "private", "internal"], case_sensitive=False),
+)
+@click.option(
+    "--payload-json",
+    default="{}",
+    show_default=True,
+    help="JSON object payload (inline).",
+)
+@click.option("--payload-file", default=None, help="Path to a JSON payload file.")
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+def event_emit_cmd(
+    slug: str,
+    event_type: str,
+    path_version: str | None,
+    stream_key: str,
+    visibility: str,
+    payload_json: str,
+    payload_file: str | None,
+    api_url: str | None,
+) -> None:
+    if payload_file:
+        try:
+            payload_value = json.loads(Path(payload_file).read_text())
+        except OSError as exc:
+            raise click.ClickException(
+                f"Failed to read --payload-file: {payload_file}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(
+                f"Invalid JSON in --payload-file: {payload_file}"
+            ) from exc
+    else:
+        try:
+            payload_value = json.loads(payload_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise click.ClickException("Invalid JSON in --payload-json") from exc
+
+    if payload_value is None:
+        payload_value = {}
+    if not isinstance(payload_value, dict):
+        raise click.ClickException("Payload must be a JSON object")
+
+    client = PathsApiClient(api_base_url=api_url)
+    try:
+        resp = client.emit_event(
+            slug=slug,
+            event_type=event_type,
+            path_version=path_version,
+            payload=payload_value,
+            visibility=visibility.lower(),
+            stream_key=stream_key.strip() or "public",
+        )
+    except PathsApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_json({"ok": True, "result": resp})
