@@ -1,0 +1,8 @@
+{
+  "filename": "skill-claude-thin.zip",
+  "host": "claude",
+  "mode": "thin",
+  "skill_name": "kaito-pt-delta-neutral",
+  "slug": "kaito-pt-delta-neutral",
+  "version": "0.1.2"
+}

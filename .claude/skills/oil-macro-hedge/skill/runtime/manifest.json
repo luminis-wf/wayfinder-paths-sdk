@@ -1,0 +1,17 @@
+{
+  "api_key_env": "WAYFINDER_API_KEY",
+  "bootstrap": "uv",
+  "component": "main",
+  "component_path": "scripts/oil_macro_hedge.py",
+  "config_path_env": "WAYFINDER_CONFIG_PATH",
+  "fallback_bootstrap": "pipx",
+  "mode": "thin",
+  "pack_version": "0.1.0",
+  "package": "wayfinder-paths",
+  "prefer_existing_runtime": true,
+  "python": ">=3.12,<3.13",
+  "require_api_key": false,
+  "skill_name": "oil-macro-hedge",
+  "slug": "oil-macro-hedge",
+  "version": "0.7.0"
+}

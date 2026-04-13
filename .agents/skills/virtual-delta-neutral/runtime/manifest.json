@@ -1,0 +1,17 @@
+{
+  "api_key_env": "WAYFINDER_API_KEY",
+  "bootstrap": "uv",
+  "component": "regime-classifier",
+  "component_path": "scripts/classify_regime.py",
+  "config_path_env": "WAYFINDER_CONFIG_PATH",
+  "fallback_bootstrap": "pipx",
+  "mode": "thin",
+  "pack_version": "0.1.13",
+  "package": "wayfinder-paths",
+  "prefer_existing_runtime": true,
+  "python": ">=3.12,<3.13",
+  "require_api_key": false,
+  "skill_name": "virtual-delta-neutral",
+  "slug": "virtual-delta-neutral",
+  "version": "0.8.0"
+}

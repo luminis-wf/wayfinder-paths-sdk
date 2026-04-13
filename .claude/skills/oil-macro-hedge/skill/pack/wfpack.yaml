@@ -1,0 +1,36 @@
+schema_version: '0.1'
+slug: oil-macro-hedge
+name: Oil Macro Hedge
+version: 0.1.0
+summary: Bearish oil via Polymarket WTI prediction markets + ETH short hedge on Hyperliquid,
+  with automatic monthly rollovers.
+primary_kind: strategy
+tags:
+- polymarket
+- hyperliquid
+- oil
+- macro
+- hedge
+components:
+- id: main
+  kind: strategy
+  path: scripts/oil_macro_hedge.py
+skill:
+  enabled: true
+  source: generated
+  name: oil-macro-hedge
+  description: 'Operate the Oil Macro Hedge pack: deposit, update (rollover), withdraw,
+    and monitor Polymarket oil positions + Hyperliquid ETH short hedge.'
+  instructions: skill/instructions.md
+  runtime:
+    mode: thin
+    package: wayfinder-paths
+    version: 0.7.0
+    python: '>=3.12,<3.13'
+    component: main
+    bootstrap: uv
+    fallback_bootstrap: pipx
+    prefer_existing_runtime: true
+    require_api_key: false
+    api_key_env: WAYFINDER_API_KEY
+    config_path_env: WAYFINDER_CONFIG_PATH

@@ -1,0 +1,17 @@
+{
+  "api_key_env": "WAYFINDER_API_KEY",
+  "bootstrap": "uv",
+  "component": "pt-delta-neutral-backtest",
+  "component_path": "scripts/pt_delta_neutral_backtest.py",
+  "config_path_env": "WAYFINDER_CONFIG_PATH",
+  "fallback_bootstrap": "pipx",
+  "mode": "thin",
+  "pack_version": "0.1.2",
+  "package": "wayfinder-paths",
+  "prefer_existing_runtime": true,
+  "python": ">=3.12,<3.13",
+  "require_api_key": false,
+  "skill_name": "kaito-pt-delta-neutral",
+  "slug": "kaito-pt-delta-neutral",
+  "version": "0.9.0"
+}
