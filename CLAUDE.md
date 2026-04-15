@@ -95,7 +95,7 @@ Before writing scripts or using adapters for a specific protocol, **invoke the r
 | Simulation / Dry-run  | `/simulation-dry-run`            |
 | Backtesting           | `/backtest-strategy`             |
 | Contract Dev          | `/contract-development`          |
-| Paths (search/install/build/publish) | `/developing-wayfinder-paths` |
+| Paths (search/install/update/build/publish) | `/developing-wayfinder-paths` |
 
 Skills contain rules for correct method usage, common gotchas, and high-value read patterns. **Always load the skill first** — don't guess at adapter APIs.
 
@@ -565,12 +565,25 @@ just create-strategy "My Strategy Name"
 # Create new adapter
 just create-adapter "my_protocol"
 
+# Update one installed path to the live bonded version
+poetry run wayfinder path update my-path
+
+# Override the target version for one installed path
+poetry run wayfinder path update my-path --version 1.2.3
+
 # Run a strategy locally
 poetry run python -m wayfinder_paths.run_strategy stablecoin_yield_strategy --action status --config config.json
 
 # Publish to PyPI (main branch only)
 just publish
 ```
+
+### Path updates
+
+- `poetry run wayfinder path update <slug>` compares the locally installed version in `.wayfinder/paths.lock.json` to the API's `active_bonded_version`.
+- By default it updates only to the current live bonded version, not `latest_version` and not a pending upgrade.
+- `--version <x.y.z>` overrides that default and installs a specific public version.
+- After pulling the new version, the CLI tries to re-use recorded activation metadata; if none is stored, it tries one safe workspace default; otherwise it falls back to pull-only and prints the manual `path activate` command.
 
 ## Architecture
 

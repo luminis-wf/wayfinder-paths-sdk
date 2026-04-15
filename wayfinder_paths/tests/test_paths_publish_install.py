@@ -13,6 +13,7 @@ from click.testing import CliRunner
 from wayfinder_paths.paths.builder import PathBuilder
 from wayfinder_paths.paths.cli import path_cli
 from wayfinder_paths.paths.client import PathsApiClient
+from wayfinder_paths.paths.doctor import DoctorIssue, PathDoctorReport
 from wayfinder_paths.paths.scaffold import init_path
 
 
@@ -688,3 +689,616 @@ def test_path_heartbeat_install_reads_legacy_lockfile(tmp_path: Path, monkeypatc
             "status": "active",
         }
     ]
+
+
+def _build_path_bundle(tmp_path: Path, *, slug: str, version: str) -> PathBuilder:
+    path_dir = tmp_path / f"{slug}-{version}"
+    init_path(
+        path_dir=path_dir,
+        slug=slug,
+        version=version,
+        primary_kind="monitor",
+        with_applet=False,
+        with_skill=True,
+    )
+    return PathBuilder.build(path_dir=path_dir, out_path=path_dir / "dist" / "bundle.zip")
+
+
+def _write_paths_lockfile(tmp_path: Path, paths: dict[str, object]) -> Path:
+    lock_dir = tmp_path / ".wayfinder"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "paths.lock.json"
+    lock_path.write_text(
+        json.dumps({"schemaVersion": "0.1", "paths": paths}, indent=2) + "\n"
+    )
+    return lock_path
+
+
+def test_path_activate_records_activation_metadata_for_installed_path(tmp_path: Path, monkeypatch):
+    installed_path = tmp_path / ".wayfinder" / "paths" / "activate-demo" / "0.1.0"
+    init_path(
+        path_dir=installed_path,
+        slug="activate-demo",
+        primary_kind="monitor",
+        with_applet=False,
+        with_skill=True,
+    )
+    _write_paths_lockfile(
+        tmp_path,
+        {
+            "activate-demo": {
+                "version": "0.1.0",
+                "bundle_sha256": "abc123",
+                "path": str(installed_path),
+            }
+        },
+    )
+
+    def fake_activate_export(*, host, scope, path_dir=None, export_path=None):
+        assert export_path is None
+        assert path_dir == installed_path.resolve()
+        return {
+            "host": host,
+            "scope": scope,
+            "source": str(path_dir),
+            "dest": str(Path.cwd()),
+            "mode": "install",
+            "applied": [str(Path.cwd() / ".claude" / "skills" / "activate-demo")],
+        }
+
+    monkeypatch.setattr("wayfinder_paths.paths.cli._activate_export", fake_activate_export)
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with runner.isolated_filesystem(temp_dir=str(workspace)):
+        result = runner.invoke(
+            path_cli,
+            [
+                "activate",
+                "--host",
+                "claude",
+                "--scope",
+                "project",
+                "--path",
+                str(installed_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["result"]["activation_recorded"] is True
+
+    lock = json.loads((tmp_path / ".wayfinder" / "paths.lock.json").read_text())
+    activation = lock["paths"]["activate-demo"]["activation"]
+    assert activation["host"] == "claude"
+    assert activation["scope"] == "project"
+    assert activation["mode"] == "install"
+    assert activation["applied"][0].endswith(".claude/skills/activate-demo")
+
+
+def test_path_activate_skips_doctor_for_installed_paths(tmp_path: Path, monkeypatch) -> None:
+    installed_path = tmp_path / ".wayfinder" / "paths" / "activate-demo" / "0.1.0"
+    init_path(
+        path_dir=installed_path,
+        slug="activate-demo",
+        primary_kind="monitor",
+        with_applet=False,
+        with_skill=True,
+    )
+    _write_paths_lockfile(
+        tmp_path,
+        {
+            "activate-demo": {
+                "version": "0.1.0",
+                "bundle_sha256": "abc123",
+                "path": str(installed_path),
+            }
+        },
+    )
+
+    def fake_run_doctor(*, path_dir: Path, fix: bool, overwrite: bool) -> PathDoctorReport:
+        return PathDoctorReport(
+            ok=False,
+            slug="activate-demo",
+            version="0.1.0",
+            primary_kind="monitor",
+            errors=[DoctorIssue(level="error", message="doctor should be skipped")],
+            warnings=[],
+            created_files=[],
+        )
+
+    monkeypatch.setattr("wayfinder_paths.paths.cli.run_doctor", fake_run_doctor)
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with runner.isolated_filesystem(temp_dir=str(workspace)):
+        result = runner.invoke(
+            path_cli,
+            [
+                "activate",
+                "--host",
+                "claude",
+                "--scope",
+                "project",
+                "--path",
+                str(installed_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["result"]["activation_recorded"] is True
+    assert Path(payload["result"]["dest"]).joinpath(
+        ".claude", "skills", "activate-demo", "SKILL.md"
+    ).exists()
+
+
+def test_path_update_requires_existing_lock_entry(tmp_path: Path):
+    _write_paths_lockfile(tmp_path, {})
+
+    result = CliRunner().invoke(
+        path_cli,
+        [
+            "update",
+            "missing-demo",
+            "--dir",
+            str(tmp_path / ".wayfinder" / "paths"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Path not found in lockfile: missing-demo" in result.output
+
+
+def test_path_update_ignores_newer_latest_when_active_bonded_matches_install(
+    tmp_path: Path, monkeypatch
+):
+    installed_path = tmp_path / ".wayfinder" / "paths" / "bonded-demo" / "1.0.0"
+    installed_path.mkdir(parents=True, exist_ok=True)
+    _write_paths_lockfile(
+        tmp_path,
+        {
+            "bonded-demo": {
+                "version": "1.0.0",
+                "path": str(installed_path),
+                "activation": {"host": "claude", "scope": "project"},
+            }
+        },
+    )
+
+    activation_calls: list[dict[str, object]] = []
+
+    def fake_activate_export(*, host, scope, path_dir=None, export_path=None):
+        activation_calls.append(
+            {
+                "host": host,
+                "scope": scope,
+                "path_dir": str(path_dir),
+                "export_path": export_path,
+            }
+        )
+        return {
+            "host": host,
+            "scope": scope,
+            "source": str(path_dir),
+            "dest": str(Path.cwd()),
+            "mode": "install",
+            "applied": [str(Path.cwd() / ".claude" / "skills" / "bonded-demo")],
+        }
+
+    class FakeUpdateClient:
+        get_path_calls: list[str] = []
+
+        def __init__(self, *, api_base_url=None):
+            self.api_base_url = api_base_url
+
+        def get_path(self, *, slug: str):
+            self.__class__.get_path_calls.append(slug)
+            return {
+                "path": {
+                    "slug": slug,
+                    "latest_version": "1.1.0",
+                    "active_bonded_version": "1.0.0",
+                },
+                "versions": [
+                    {"version": "1.1.0", "bundle_sha256": "bb" * 32},
+                    {"version": "1.0.0", "bundle_sha256": "aa" * 32},
+                ],
+            }
+
+    monkeypatch.setattr("wayfinder_paths.paths.cli.PathsApiClient", FakeUpdateClient)
+    monkeypatch.setattr("wayfinder_paths.paths.cli._activate_export", fake_activate_export)
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with runner.isolated_filesystem(temp_dir=str(workspace)):
+        result = runner.invoke(
+            path_cli,
+            [
+                "update",
+                "bonded-demo",
+                "--dir",
+                str(tmp_path / ".wayfinder" / "paths"),
+                "--api-url",
+                "https://paths.example",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["result"]["current_version"] == "1.0.0"
+    assert payload["result"]["target_version"] == "1.0.0"
+    assert payload["result"]["updated"] is False
+    assert payload["result"]["activated"] is True
+    assert payload["result"]["activation_source"] == "lockfile"
+    assert activation_calls == [
+        {
+            "host": "claude",
+            "scope": "project",
+            "path_dir": str(installed_path),
+            "export_path": None,
+        }
+    ]
+
+
+def test_path_update_reuses_lockfile_activation_for_live_bonded_upgrade(
+    tmp_path: Path, monkeypatch
+):
+    built = _build_path_bundle(tmp_path, slug="update-demo", version="1.1.0")
+    _write_paths_lockfile(
+        tmp_path,
+        {
+            "update-demo": {
+                "version": "1.0.0",
+                "bundle_sha256": "11" * 32,
+                "path": str(tmp_path / ".wayfinder" / "paths" / "update-demo" / "1.0.0"),
+                "activation": {"host": "claude", "scope": "project"},
+            }
+        },
+    )
+
+    activation_calls: list[dict[str, object]] = []
+
+    def fake_activate_export(*, host, scope, path_dir=None, export_path=None):
+        activation_calls.append(
+            {
+                "host": host,
+                "scope": scope,
+                "path_dir": str(path_dir),
+                "export_path": export_path,
+            }
+        )
+        return {
+            "host": host,
+            "scope": scope,
+            "source": str(path_dir),
+            "dest": str(Path.cwd()),
+            "mode": "install",
+            "applied": [str(Path.cwd() / ".claude" / "skills" / "update-demo")],
+        }
+
+    class FakeUpdateClient:
+        def __init__(self, *, api_base_url=None):
+            self.api_base_url = api_base_url
+
+        def get_path(self, *, slug: str):
+            return {
+                "path": {
+                    "slug": slug,
+                    "latest_version": "1.2.0",
+                    "active_bonded_version": "1.1.0",
+                },
+                "versions": [
+                    {"version": "1.1.0", "bundle_sha256": built.bundle_sha256},
+                    {"version": "1.0.0", "bundle_sha256": "11" * 32},
+                ],
+            }
+
+        def get_path_version(self, *, slug: str, version: str):
+            return {
+                "version": {"version": version, "bundle_sha256": built.bundle_sha256}
+            }
+
+        def create_install_intent(self, **kwargs):
+            expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+            return {
+                "intent": {
+                    "intent_id": "intent-update",
+                    "path_slug": kwargs["slug"],
+                    "version": kwargs["version"],
+                    "bundle_sha256": built.bundle_sha256,
+                    "issued_at": datetime.now(UTC).isoformat(),
+                    "expires_at": expires_at,
+                    "runtime": kwargs["runtime"],
+                },
+                "signature": "signed-intent",
+            }
+
+        def download_bundle(self, *, slug: str, version: str, out_path: Path):
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(built.bundle_path.read_bytes())
+            return out_path
+
+        def submit_install_receipt(self, **kwargs):
+            return {
+                "status": "recorded",
+                "installation_id": "install-update",
+                "heartbeat_token": "heartbeat-update",
+            }
+
+    monkeypatch.setattr("wayfinder_paths.paths.cli.PathsApiClient", FakeUpdateClient)
+    monkeypatch.setattr("wayfinder_paths.paths.cli._activate_export", fake_activate_export)
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with runner.isolated_filesystem(temp_dir=str(workspace)):
+        result = runner.invoke(
+            path_cli,
+            [
+                "update",
+                "update-demo",
+                "--dir",
+                str(tmp_path / ".wayfinder" / "paths"),
+                "--api-url",
+                "https://paths.example",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["result"]["updated"] is True
+        assert payload["result"]["activated"] is True
+        assert payload["result"]["activation_source"] == "lockfile"
+        assert payload["result"]["target_version"] == "1.1.0"
+        assert payload["result"]["install"]["installation_id"] == "install-update"
+
+    assert activation_calls == [
+        {
+            "host": "claude",
+            "scope": "project",
+            "path_dir": str(tmp_path / ".wayfinder" / "paths" / "update-demo" / "1.1.0"),
+            "export_path": None,
+        }
+    ]
+    lock = json.loads((tmp_path / ".wayfinder" / "paths.lock.json").read_text())
+    assert lock["paths"]["update-demo"]["version"] == "1.1.0"
+    assert lock["paths"]["update-demo"]["installation_id"] == "install-update"
+    assert lock["paths"]["update-demo"]["activation"]["host"] == "claude"
+
+
+def test_path_update_uses_default_activation_when_workspace_has_single_marker(
+    tmp_path: Path, monkeypatch
+):
+    built = _build_path_bundle(tmp_path, slug="default-demo", version="1.1.0")
+    _write_paths_lockfile(
+        tmp_path,
+        {
+            "default-demo": {
+                "version": "1.0.0",
+                "bundle_sha256": "11" * 32,
+                "path": str(tmp_path / ".wayfinder" / "paths" / "default-demo" / "1.0.0"),
+            }
+        },
+    )
+
+    activation_calls: list[dict[str, object]] = []
+
+    def fake_activate_export(*, host, scope, path_dir=None, export_path=None):
+        activation_calls.append({"host": host, "scope": scope, "path_dir": str(path_dir)})
+        return {
+            "host": host,
+            "scope": scope,
+            "source": str(path_dir),
+            "dest": str(Path.cwd()),
+            "mode": "install",
+            "applied": [str(Path.cwd() / ".claude" / "skills" / "default-demo")],
+        }
+
+    class FakeUpdateClient:
+        def __init__(self, *, api_base_url=None):
+            self.api_base_url = api_base_url
+
+        def get_path(self, *, slug: str):
+            return {
+                "path": {
+                    "slug": slug,
+                    "latest_version": "1.2.0",
+                    "active_bonded_version": "1.1.0",
+                },
+                "versions": [{"version": "1.1.0", "bundle_sha256": built.bundle_sha256}],
+            }
+
+        def get_path_version(self, *, slug: str, version: str):
+            return {
+                "version": {"version": version, "bundle_sha256": built.bundle_sha256}
+            }
+
+        def create_install_intent(self, **kwargs):
+            return {
+                "intent": {"intent_id": "intent-default", "version": kwargs["version"]},
+                "signature": "signed-intent",
+            }
+
+        def download_bundle(self, *, slug: str, version: str, out_path: Path):
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(built.bundle_path.read_bytes())
+            return out_path
+
+        def submit_install_receipt(self, **kwargs):
+            return {"status": "recorded", "installation_id": "install-default", "heartbeat_token": "heartbeat-default"}
+
+    monkeypatch.setattr("wayfinder_paths.paths.cli.PathsApiClient", FakeUpdateClient)
+    monkeypatch.setattr("wayfinder_paths.paths.cli._activate_export", fake_activate_export)
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with runner.isolated_filesystem(temp_dir=str(workspace)):
+        Path(".claude").mkdir()
+        result = runner.invoke(
+            path_cli,
+            [
+                "update",
+                "default-demo",
+                "--dir",
+                str(tmp_path / ".wayfinder" / "paths"),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["result"]["activated"] is True
+        assert payload["result"]["activation_source"] == "default"
+
+    assert activation_calls == [
+        {
+            "host": "claude",
+            "scope": "project",
+            "path_dir": str(tmp_path / ".wayfinder" / "paths" / "default-demo" / "1.1.0"),
+        }
+    ]
+
+
+def test_path_update_falls_back_to_pull_without_activation_target(
+    tmp_path: Path, monkeypatch
+):
+    built = _build_path_bundle(tmp_path, slug="manual-demo", version="1.1.0")
+    _write_paths_lockfile(
+        tmp_path,
+        {
+            "manual-demo": {
+                "version": "1.0.0",
+                "bundle_sha256": "11" * 32,
+                "path": str(tmp_path / ".wayfinder" / "paths" / "manual-demo" / "1.0.0"),
+            }
+        },
+    )
+
+    class FakeUpdateClient:
+        def __init__(self, *, api_base_url=None):
+            self.api_base_url = api_base_url
+
+        def get_path(self, *, slug: str):
+            return {
+                "path": {
+                    "slug": slug,
+                    "latest_version": "1.2.0",
+                    "active_bonded_version": "1.1.0",
+                },
+                "versions": [{"version": "1.1.0", "bundle_sha256": built.bundle_sha256}],
+            }
+
+        def get_path_version(self, *, slug: str, version: str):
+            return {
+                "version": {"version": version, "bundle_sha256": built.bundle_sha256}
+            }
+
+        def create_install_intent(self, **kwargs):
+            return {
+                "intent": {"intent_id": "intent-manual", "version": kwargs["version"]},
+                "signature": "signed-intent",
+            }
+
+        def download_bundle(self, *, slug: str, version: str, out_path: Path):
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(built.bundle_path.read_bytes())
+            return out_path
+
+        def submit_install_receipt(self, **kwargs):
+            return {"status": "recorded", "installation_id": "install-manual", "heartbeat_token": "heartbeat-manual"}
+
+    monkeypatch.setattr("wayfinder_paths.paths.cli.PathsApiClient", FakeUpdateClient)
+
+    runner = CliRunner()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with runner.isolated_filesystem(temp_dir=str(workspace)):
+        result = runner.invoke(
+            path_cli,
+            [
+                "update",
+                "manual-demo",
+                "--dir",
+                str(tmp_path / ".wayfinder" / "paths"),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["result"]["updated"] is True
+        assert payload["result"]["activated"] is False
+        assert payload["result"]["activation_source"] == "none"
+        assert (
+            "wayfinder path activate --host <host> --scope <scope>"
+            in payload["result"]["manual_activate_command"]
+        )
+
+
+def test_path_update_allows_explicit_version_override(tmp_path: Path, monkeypatch):
+    built = _build_path_bundle(tmp_path, slug="override-demo", version="1.0.1")
+    _write_paths_lockfile(
+        tmp_path,
+        {
+            "override-demo": {
+                "version": "1.0.0",
+                "bundle_sha256": "11" * 32,
+                "path": str(tmp_path / ".wayfinder" / "paths" / "override-demo" / "1.0.0"),
+            }
+        },
+    )
+
+    class FakeUpdateClient:
+        def __init__(self, *, api_base_url=None):
+            self.api_base_url = api_base_url
+
+        def get_path(self, *, slug: str):
+            return {
+                "path": {
+                    "slug": slug,
+                    "latest_version": "1.2.0",
+                    "active_bonded_version": "1.1.0",
+                },
+                "versions": [{"version": "1.0.1", "bundle_sha256": built.bundle_sha256}],
+            }
+
+        def get_path_version(self, *, slug: str, version: str):
+            return {
+                "version": {"version": version, "bundle_sha256": built.bundle_sha256}
+            }
+
+        def create_install_intent(self, **kwargs):
+            return {
+                "intent": {"intent_id": "intent-override", "version": kwargs["version"]},
+                "signature": "signed-intent",
+            }
+
+        def download_bundle(self, *, slug: str, version: str, out_path: Path):
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(built.bundle_path.read_bytes())
+            return out_path
+
+        def submit_install_receipt(self, **kwargs):
+            return {"status": "recorded", "installation_id": "install-override", "heartbeat_token": "heartbeat-override"}
+
+    monkeypatch.setattr("wayfinder_paths.paths.cli.PathsApiClient", FakeUpdateClient)
+
+    result = CliRunner().invoke(
+        path_cli,
+        [
+            "update",
+            "override-demo",
+            "--version",
+            "1.0.1",
+            "--dir",
+            str(tmp_path / ".wayfinder" / "paths"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["result"]["target_version"] == "1.0.1"
+    assert payload["result"]["install"]["version"] == "1.0.1"

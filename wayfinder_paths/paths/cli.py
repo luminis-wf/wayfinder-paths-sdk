@@ -3,9 +3,11 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -42,8 +44,19 @@ _LOCKFILE_NAME = "paths.lock.json"
 _LEGACY_LOCKFILE_NAME = "packs.lock.json"
 
 
+@dataclass(frozen=True)
+class _ActivationTarget:
+    host: str
+    scope: str
+    source: str
+
+
 def _echo_json(data: Any) -> None:
     click.echo(json.dumps(data, indent=2, default=str))
+
+
+def _iso_utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _path_install_venue(*, runtime: str) -> str:
@@ -94,10 +107,37 @@ def _load_install_lock(state_dir: Path) -> tuple[dict[str, Any], Path]:
 def _write_install_lock(lock_path: Path, lock: dict[str, Any]) -> None:
     normalized = {key: value for key, value in lock.items() if key != "packs"}
     normalized["schemaVersion"] = normalized.get("schemaVersion") or "0.1"
-    normalized["generatedAt"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    normalized["generatedAt"] = _iso_utc_now()
     normalized["paths"] = normalized.get("paths") or {}
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(json.dumps(normalized, indent=2, default=str) + "\n")
+
+
+def _lock_paths_map(lock: dict[str, Any]) -> dict[str, Any]:
+    paths_map = lock.get("paths")
+    if isinstance(paths_map, dict):
+        return paths_map
+    paths_map = {}
+    lock["paths"] = paths_map
+    return paths_map
+
+
+def _lock_path_entry(lock: dict[str, Any], slug: str) -> dict[str, Any] | None:
+    entry = _lock_paths_map(lock).get(slug)
+    return entry if isinstance(entry, dict) else None
+
+
+def _update_lock_path_entry(
+    lock: dict[str, Any],
+    lock_path: Path,
+    *,
+    slug: str,
+    entry: dict[str, Any],
+) -> None:
+    paths_map = _lock_paths_map(lock)
+    paths_map[slug] = entry
+    lock["paths"] = paths_map
+    _write_install_lock(lock_path, lock)
 
 
 def _doctor_result_payload(report: PathDoctorReport) -> dict[str, Any]:
@@ -261,7 +301,7 @@ def _export_single_skill(
     *,
     path_dir: Path,
     host: str,
-) -> tuple[PathDoctorReport, PathSkillRenderReport]:
+) -> tuple[PathDoctorReport | None, PathSkillRenderReport]:
     try:
         doctor_report = run_doctor(path_dir=path_dir, fix=False, overwrite=False)
     except PathDoctorError as exc:
@@ -273,6 +313,17 @@ def _export_single_skill(
     except PathSkillRenderError as exc:
         raise click.ClickException(str(exc)) from exc
     return doctor_report, render_report
+
+
+def _render_installed_skill(
+    *,
+    path_dir: Path,
+    host: str,
+) -> PathSkillRenderReport:
+    try:
+        return render_skill_exports(path_dir=path_dir, hosts=[host])
+    except PathSkillRenderError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _copy_export_tree(src: Path, dest: Path) -> None:
@@ -410,6 +461,191 @@ def _apply_install_targets(source_dir: Path, destination_root: Path) -> list[str
             applied.append(str(dest))
             continue
     return applied
+
+
+def _activation_record(
+    *,
+    host: str,
+    scope: str,
+    mode: str,
+    dest: Path,
+    applied: list[str],
+) -> dict[str, Any]:
+    return {
+        "host": host,
+        "scope": scope,
+        "mode": mode,
+        "dest": str(dest),
+        "applied": list(applied),
+        "updated_at": _iso_utc_now(),
+    }
+
+
+def _activation_target_from_entry(entry: dict[str, Any]) -> _ActivationTarget | None:
+    activation = entry.get("activation")
+    if not isinstance(activation, dict):
+        return None
+    host = str(activation.get("host") or "").strip().lower()
+    scope = str(activation.get("scope") or "").strip().lower()
+    if not host or not scope:
+        return None
+    return _ActivationTarget(host=host, scope=scope, source="lockfile")
+
+
+def _infer_activation_target(*, cwd: Path) -> _ActivationTarget | None:
+    candidates: list[_ActivationTarget] = []
+    markers = (
+        (cwd / ".claude", "claude", "project"),
+        (cwd / "opencode.json", "opencode", "project"),
+        (cwd / ".agents", "codex", "repo"),
+        (cwd / "skills", "openclaw", "workspace"),
+    )
+    for marker, host, scope in markers:
+        if marker.exists():
+            candidates.append(_ActivationTarget(host=host, scope=scope, source="default"))
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _manual_activate_command(*, path_dir: Path) -> str:
+    return (
+        "wayfinder path activate --host <host> --scope <scope> "
+        f"--path {shlex.quote(str(path_dir))}"
+    )
+
+
+def _installed_path_dir(
+    *,
+    base: Path,
+    slug: str,
+    version: str,
+    entry: dict[str, Any],
+) -> Path:
+    raw_path = str(entry.get("path") or "").strip()
+    if raw_path:
+        candidate = Path(raw_path).expanduser()
+        if candidate.is_absolute() or candidate.exists():
+            return candidate
+    return base / slug / version
+
+
+def _find_state_dir_for_installed_path(path_dir: Path) -> Path | None:
+    resolved = path_dir.expanduser().resolve()
+    for candidate in (resolved, *resolved.parents):
+        if candidate.name in {_INSTALL_DIRNAME, _LEGACY_INSTALL_DIRNAME}:
+            return _state_dir_for_install_root(candidate)
+    return None
+
+
+def _resolve_installed_lock_entry(
+    path_dir: Path,
+) -> tuple[dict[str, Any], Path, str, dict[str, Any]] | None:
+    state_dir = _find_state_dir_for_installed_path(path_dir)
+    if state_dir is None:
+        return None
+    lock, lock_path = _load_install_lock(state_dir)
+    resolved_path = path_dir.expanduser().resolve()
+    for slug, raw_entry in _lock_paths_map(lock).items():
+        if not isinstance(slug, str) or not isinstance(raw_entry, dict):
+            continue
+        entry_path = str(raw_entry.get("path") or "").strip()
+        if not entry_path:
+            continue
+        try:
+            candidate = Path(entry_path).expanduser().resolve()
+        except Exception:
+            continue
+        if candidate == resolved_path:
+            return lock, lock_path, slug, raw_entry
+    return None
+
+
+def _record_activation_for_entry(
+    *,
+    lock: dict[str, Any],
+    lock_path: Path,
+    slug: str,
+    entry: dict[str, Any],
+    host: str,
+    scope: str,
+    mode: str,
+    dest: Path,
+    applied: list[str],
+) -> dict[str, Any]:
+    updated_entry = dict(entry)
+    updated_entry["activation"] = _activation_record(
+        host=host,
+        scope=scope,
+        mode=mode,
+        dest=dest,
+        applied=applied,
+    )
+    _update_lock_path_entry(lock, lock_path, slug=slug, entry=updated_entry)
+    return updated_entry
+
+
+def _activate_export(
+    *,
+    host: str,
+    scope: str,
+    path_dir: Path | None = None,
+    export_path: Path | None = None,
+) -> dict[str, Any]:
+    if (path_dir is None) == (export_path is None):
+        raise click.ClickException("Provide exactly one of --path or --export-path")
+
+    normalized_host = host.lower()
+    normalized_scope = scope.strip().lower()
+    source_dir: Path
+
+    if path_dir is not None:
+        installed_entry = _resolve_installed_lock_entry(path_dir)
+        # Installed bundles are already published artifacts; avoid re-running
+        # doctor because newer SDK validators can reject older live bundles.
+        if installed_entry is not None:
+            render_report = _render_installed_skill(
+                path_dir=path_dir,
+                host=normalized_host,
+            )
+        else:
+            _, render_report = _export_single_skill(
+                path_dir=path_dir,
+                host=normalized_host,
+            )
+        source_dir = render_report.exports[normalized_host].export_dir
+        skill_name = render_report.skill_name or source_dir.name
+    else:
+        source_dir = export_path.expanduser().resolve() if export_path else Path()
+        if not (source_dir / "SKILL.md").exists():
+            raise click.ClickException(f"Rendered export not found: {source_dir}")
+        skill_name = source_dir.name
+
+    export_manifest = _read_export_manifest(source_dir)
+    install_targets = export_manifest.get("install_targets") or []
+    if install_targets:
+        destination_root = _activate_install_root(
+            normalized_host, normalized_scope, cwd=Path.cwd()
+        )
+        applied = _apply_install_targets(source_dir, destination_root)
+        dest = destination_root
+        mode = "install"
+    else:
+        destination_root = _activate_destination(
+            normalized_host, normalized_scope, cwd=Path.cwd()
+        )
+        dest = destination_root / skill_name
+        _copy_export_tree(source_dir, dest)
+        applied = [str(dest)]
+        mode = "copy"
+    return {
+        "host": normalized_host,
+        "scope": normalized_scope,
+        "source": str(source_dir),
+        "dest": str(dest),
+        "mode": mode,
+        "applied": applied,
+    }
 
 
 @click.group(name="path", help="Build, publish, and emit signals for Paths.")
@@ -687,56 +923,37 @@ def activate_cmd(
     path_dir: str | None,
     export_path: str | None,
 ) -> None:
-    if bool(path_dir) == bool(export_path):
-        raise click.ClickException("Provide exactly one of --path or --export-path")
-
-    normalized_host = host.lower()
-    normalized_scope = scope.strip().lower()
-    source_dir: Path
-
-    if path_dir:
-        _, render_report = _export_single_skill(
-            path_dir=Path(path_dir),
-            host=normalized_host,
-        )
-        source_dir = render_report.exports[normalized_host].export_dir
-        skill_name = render_report.skill_name or source_dir.name
-    else:
-        source_dir = Path(export_path or "").expanduser().resolve()
-        if not (source_dir / "SKILL.md").exists():
-            raise click.ClickException(f"Rendered export not found: {source_dir}")
-        skill_name = source_dir.name
-
-    export_manifest = _read_export_manifest(source_dir)
-    install_targets = export_manifest.get("install_targets") or []
-    if install_targets:
-        destination_root = _activate_install_root(
-            normalized_host, normalized_scope, cwd=Path.cwd()
-        )
-        applied = _apply_install_targets(source_dir, destination_root)
-        dest = destination_root
-        mode = "install"
-    else:
-        destination_root = _activate_destination(
-            normalized_host, normalized_scope, cwd=Path.cwd()
-        )
-        dest = destination_root / skill_name
-        _copy_export_tree(source_dir, dest)
-        applied = [str(dest)]
-        mode = "copy"
-    _echo_json(
-        {
-            "ok": True,
-            "result": {
-                "host": normalized_host,
-                "scope": normalized_scope,
-                "source": str(source_dir),
-                "dest": str(dest),
-                "mode": mode,
-                "applied": applied,
-            },
-        }
+    source_path = Path(path_dir).expanduser().resolve() if path_dir else None
+    rendered_export_path = (
+        Path(export_path).expanduser().resolve() if export_path else None
     )
+    result = _activate_export(
+        host=host,
+        scope=scope,
+        path_dir=source_path,
+        export_path=rendered_export_path,
+    )
+
+    activation_recorded = False
+    if source_path is not None:
+        resolved_entry = _resolve_installed_lock_entry(source_path)
+        if resolved_entry is not None:
+            lock, lock_path, slug, entry = resolved_entry
+            _record_activation_for_entry(
+                lock=lock,
+                lock_path=lock_path,
+                slug=slug,
+                entry=entry,
+                host=str(result["host"]),
+                scope=str(result["scope"]),
+                mode=str(result["mode"]),
+                dest=Path(str(result["dest"])),
+                applied=[str(item) for item in result["applied"]],
+            )
+            activation_recorded = True
+
+    result["activation_recorded"] = activation_recorded
+    _echo_json({"ok": True, "result": result})
 
 
 @path_cli.command(
@@ -1061,17 +1278,9 @@ def _safe_extract_zip(zip_path: Path, *, dest_dir: Path) -> list[str]:
     return extracted
 
 
-def _install_path(
-    *,
-    slug: str,
-    path_version: str | None,
-    install_dir: str,
-    force: bool,
-    no_verify: bool,
-    api_url: str | None,
-) -> None:
-    client = PathsApiClient(api_base_url=api_url)
-    venue = _path_install_venue(runtime="sdk-cli")
+def _read_path_registry_detail(
+    client: PathsApiClient, *, slug: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     try:
         detail = client.get_path(slug=slug)
     except PathsApiError as exc:
@@ -1081,15 +1290,19 @@ def _install_path(
     versions = detail.get("versions") if isinstance(detail, dict) else None
     if not isinstance(path_obj, dict) or not isinstance(versions, list) or not versions:
         raise click.ClickException("Path not found or has no versions")
+    normalized_versions = [item for item in versions if isinstance(item, dict)]
+    if not normalized_versions:
+        raise click.ClickException("Path not found or has no versions")
+    return path_obj, normalized_versions
 
-    desired_version = (
-        path_version or str(path_obj.get("latest_version") or "")
-    ).strip()
-    if not desired_version:
-        desired_version = str(versions[0].get("version") or "").strip()
-    if not desired_version:
-        raise click.ClickException("Path has no published versions")
 
+def _resolve_path_version_payload(
+    client: PathsApiClient,
+    *,
+    slug: str,
+    versions: list[dict[str, Any]],
+    desired_version: str,
+) -> dict[str, Any]:
     version_obj = next(
         (v for v in versions if str(v.get("version") or "").strip() == desired_version),
         None,
@@ -1105,6 +1318,49 @@ def _install_path(
 
     if not isinstance(version_obj, dict):
         raise click.ClickException(f"Version not found: {desired_version}")
+    return version_obj
+
+
+def _default_install_version(
+    *,
+    path_obj: dict[str, Any],
+    versions: list[dict[str, Any]],
+    path_version: str | None,
+) -> str:
+    desired_version = (
+        path_version or str(path_obj.get("latest_version") or "")
+    ).strip()
+    if not desired_version:
+        desired_version = str(versions[0].get("version") or "").strip()
+    if not desired_version:
+        raise click.ClickException("Path has no published versions")
+    return desired_version
+
+
+def _default_update_version(
+    *,
+    path_obj: dict[str, Any],
+    path_version: str | None,
+) -> str:
+    desired_version = (path_version or str(path_obj.get("active_bonded_version") or "")).strip()
+    if not desired_version:
+        raise click.ClickException(
+            "Path has no active bonded version. Use --version to install a specific public version."
+        )
+    return desired_version
+
+
+def _install_path_version(
+    *,
+    client: PathsApiClient,
+    slug: str,
+    desired_version: str,
+    version_obj: dict[str, Any],
+    install_dir: str,
+    force: bool,
+    no_verify: bool,
+) -> dict[str, Any]:
+    venue = _path_install_venue(runtime="sdk-cli")
 
     expected_sha = str(version_obj.get("bundle_sha256") or "").strip()
     if not expected_sha and not no_verify:
@@ -1153,19 +1409,20 @@ def _install_path(
     extracted = _safe_extract_zip(bundle_path, dest_dir=dest)
 
     lock, lock_path = _load_install_lock(state_dir)
-
-    paths_map = lock.get("paths")
-    if not isinstance(paths_map, dict):
-        paths_map = {}
-    paths_map[slug] = {
-        "version": desired_version,
-        "bundle_sha256": actual_sha,
-        "venue": venue,
-        "installed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "path": str(dest),
-    }
-    lock["paths"] = paths_map
-    _write_install_lock(lock_path, lock)
+    existing_entry = _lock_path_entry(lock, slug) or {}
+    entry = dict(existing_entry)
+    entry.update(
+        {
+            "version": desired_version,
+            "bundle_sha256": actual_sha,
+            "venue": venue,
+            "installed_at": _iso_utc_now(),
+            "path": str(dest),
+        }
+    )
+    entry["installation_id"] = None
+    entry["heartbeat_token"] = None
+    _update_lock_path_entry(lock, lock_path, slug=slug, entry=entry)
 
     receipt_status = "skipped"
     installation_id = None
@@ -1188,33 +1445,97 @@ def _install_path(
             warnings.append(f"Could not submit install receipt: {exc}")
             receipt_status = "error"
 
-    paths_map[slug]["installation_id"] = installation_id
-    paths_map[slug]["heartbeat_token"] = heartbeat_token
-    lock["paths"] = paths_map
-    _write_install_lock(lock_path, lock)
-
-    _echo_json(
+    lock, lock_path = _load_install_lock(state_dir)
+    entry = dict(_lock_path_entry(lock, slug) or {})
+    entry.update(
         {
-            "ok": True,
-            "result": {
-                "slug": slug,
-                "version": desired_version,
-                "bundle_path": str(bundle_path),
-                "bundle_sha256": actual_sha,
-                "dest": str(dest),
-                "extracted_files": len(extracted),
-                "lockfile": str(lock_path),
-                "install_intent_id": intent_payload.get("intent_id")
-                if intent_payload
-                else None,
-                "installation_id": installation_id,
-                "heartbeat_enabled": bool(installation_id and heartbeat_token),
-                "verified_install": receipt_status in {"recorded", "duplicate"},
-                "install_receipt_status": receipt_status,
-                "warnings": warnings,
-            },
+            "version": desired_version,
+            "bundle_sha256": actual_sha,
+            "venue": venue,
+            "installed_at": entry.get("installed_at") or _iso_utc_now(),
+            "path": str(dest),
+            "installation_id": installation_id,
+            "heartbeat_token": heartbeat_token,
         }
     )
+    _update_lock_path_entry(lock, lock_path, slug=slug, entry=entry)
+
+    return {
+        "version": desired_version,
+        "bundle_path": str(bundle_path),
+        "bundle_sha256": actual_sha,
+        "dest": str(dest),
+        "extracted_files": len(extracted),
+        "lockfile": str(lock_path),
+        "install_intent_id": intent_payload.get("intent_id") if intent_payload else None,
+        "installation_id": installation_id,
+        "heartbeat_enabled": bool(installation_id and heartbeat_token),
+        "verified_install": receipt_status in {"recorded", "duplicate"},
+        "install_receipt_status": receipt_status,
+        "warnings": warnings,
+    }
+
+
+def _install_path(
+    *,
+    slug: str,
+    path_version: str | None,
+    install_dir: str,
+    force: bool,
+    no_verify: bool,
+    api_url: str | None,
+) -> None:
+    client = PathsApiClient(api_base_url=api_url)
+    path_obj, versions = _read_path_registry_detail(client, slug=slug)
+    desired_version = _default_install_version(
+        path_obj=path_obj,
+        versions=versions,
+        path_version=path_version,
+    )
+    version_obj = _resolve_path_version_payload(
+        client,
+        slug=slug,
+        versions=versions,
+        desired_version=desired_version,
+    )
+    result = _install_path_version(
+        client=client,
+        slug=slug,
+        desired_version=desired_version,
+        version_obj=version_obj,
+        install_dir=install_dir,
+        force=force,
+        no_verify=no_verify,
+    )
+    _echo_json({"ok": True, "result": {"slug": slug, **result}})
+
+
+def _explicit_activation_target(
+    *, host: str | None, scope: str | None
+) -> _ActivationTarget | None:
+    host_value = str(host or "").strip().lower()
+    scope_value = str(scope or "").strip().lower()
+    if not host_value and not scope_value:
+        return None
+    if not host_value or not scope_value:
+        raise click.ClickException("--host and --scope must be provided together")
+    return _ActivationTarget(host=host_value, scope=scope_value, source="explicit")
+
+
+def _resolve_update_activation_target(
+    *,
+    entry: dict[str, Any],
+    host: str | None,
+    scope: str | None,
+    cwd: Path,
+) -> _ActivationTarget | None:
+    explicit_target = _explicit_activation_target(host=host, scope=scope)
+    if explicit_target is not None:
+        return explicit_target
+    lock_target = _activation_target_from_entry(entry)
+    if lock_target is not None:
+        return lock_target
+    return _infer_activation_target(cwd=cwd)
 
 
 @path_cli.command(name="install", help="Download and unpack a path bundle locally.")
@@ -1283,6 +1604,143 @@ def pull_cmd(
         no_verify=no_verify,
         api_url=api_url,
     )
+
+
+@path_cli.command(
+    name="update", help="Update an installed path to the live bonded version."
+)
+@click.argument("slug")
+@click.option(
+    "--version",
+    "path_version",
+    default=None,
+    help="Optional public version override instead of the live bonded version.",
+)
+@click.option(
+    "--dir",
+    "install_dir",
+    default=".wayfinder/paths",
+    show_default=True,
+    help="Base install directory.",
+)
+@click.option("--force", is_flag=True, help="Overwrite an existing target version.")
+@click.option("--no-verify", is_flag=True, help="Skip bundle SHA-256 verification.")
+@click.option("--api-url", "api_url", default=None, help="Override Paths API base URL.")
+@click.option(
+    "--host",
+    default=None,
+    type=click.Choice(["claude", "opencode", "codex", "openclaw"], case_sensitive=False),
+    help="Activation host override.",
+)
+@click.option("--scope", default=None, help="Activation scope override.")
+def update_cmd(
+    slug: str,
+    path_version: str | None,
+    install_dir: str,
+    force: bool,
+    no_verify: bool,
+    api_url: str | None,
+    host: str | None,
+    scope: str | None,
+) -> None:
+    base = _canonical_install_root(install_dir)
+    state_dir = _state_dir_for_install_root(base)
+    lock, lock_path = _load_install_lock(state_dir)
+    if not lock_path.exists() and not (state_dir / _LEGACY_LOCKFILE_NAME).exists():
+        raise click.ClickException(f"Lockfile not found: {lock_path}")
+
+    entry = _lock_path_entry(lock, slug)
+    if entry is None:
+        raise click.ClickException(f"Path not found in lockfile: {slug}")
+
+    current_version = str(entry.get("version") or "").strip()
+    if not current_version:
+        raise click.ClickException(f"Installed path is missing a version in the lockfile: {slug}")
+
+    client = PathsApiClient(api_base_url=api_url)
+    path_obj, versions = _read_path_registry_detail(client, slug=slug)
+    target_version = _default_update_version(
+        path_obj=path_obj,
+        path_version=path_version,
+    )
+    activation_entry = entry
+    installed_path = _installed_path_dir(
+        base=base,
+        slug=slug,
+        version=current_version,
+        entry=entry,
+    )
+
+    result: dict[str, Any] = {
+        "slug": slug,
+        "current_version": current_version,
+        "target_version": target_version,
+        "updated": False,
+        "activated": False,
+        "activation_source": "none",
+        "manual_activate_command": None,
+        "warnings": [],
+        "lockfile": str(lock_path),
+    }
+
+    if current_version != target_version:
+        version_obj = _resolve_path_version_payload(
+            client,
+            slug=slug,
+            versions=versions,
+            desired_version=target_version,
+        )
+        install_result = _install_path_version(
+            client=client,
+            slug=slug,
+            desired_version=target_version,
+            version_obj=version_obj,
+            install_dir=install_dir,
+            force=force,
+            no_verify=no_verify,
+        )
+        result["updated"] = True
+        result["install"] = install_result
+        result["lockfile"] = install_result["lockfile"]
+        result["warnings"] = list(install_result.get("warnings") or [])
+        installed_path = Path(str(install_result["dest"]))
+        lock, lock_path = _load_install_lock(state_dir)
+        activation_entry = _lock_path_entry(lock, slug) or activation_entry
+
+    activation_target = _resolve_update_activation_target(
+        entry=activation_entry,
+        host=host,
+        scope=scope,
+        cwd=Path.cwd(),
+    )
+    if activation_target is None:
+        result["manual_activate_command"] = _manual_activate_command(path_dir=installed_path)
+        _echo_json({"ok": True, "result": result})
+        return
+
+    activation_result = _activate_export(
+        host=activation_target.host,
+        scope=activation_target.scope,
+        path_dir=installed_path,
+    )
+    lock, lock_path = _load_install_lock(state_dir)
+    updated_entry = _lock_path_entry(lock, slug) or {}
+    _record_activation_for_entry(
+        lock=lock,
+        lock_path=lock_path,
+        slug=slug,
+        entry=updated_entry,
+        host=activation_target.host,
+        scope=activation_target.scope,
+        mode=str(activation_result["mode"]),
+        dest=Path(str(activation_result["dest"])),
+        applied=[str(item) for item in activation_result["applied"]],
+    )
+
+    result["activated"] = True
+    result["activation_source"] = activation_target.source
+    result["activation"] = activation_result
+    _echo_json({"ok": True, "result": result})
 
 
 @path_cli.command(
