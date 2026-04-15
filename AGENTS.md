@@ -32,6 +32,29 @@ When the SDK runs inside Wayfinder Cloud, two env vars are injected at startup:
 
 Config priority: `Constructor parameter > config.json > WAYFINDER_API_KEY env var`.
 
+## Messaging the user (Cloud instances only)
+
+If you detected an OpenCode Cloud instance in "First-Time Setup" (health probe at `http://localhost:4096/global/health` returned `healthy: true`), you may email the owner to report completed work, surface decisions that need them, or flag anything you can't resolve. The backend only delivers when `email_verified` is true on the user, and throttles to **4 emails / user / day** — budget your sends accordingly. The `message` field is rendered as Markdown (headings, lists, code blocks, tables, links) into a themed HTML email, so format it nicely.
+
+**MCP CLI:**
+```
+poetry run python -m wayfinder_paths.mcp.cli notify \
+  --title "Rebalance complete" \
+  --message "Moved **50 USDC** from Aave → Morpho.\n\n- tx: 0x…\n- new APY: 7.4%"
+```
+
+**Python client:**
+```python
+from wayfinder_paths.core.clients import NOTIFY_CLIENT
+
+await NOTIFY_CLIENT.notify(
+    title="Rebalance complete",
+    message="Moved **50 USDC** from Aave → Morpho.\n\n- tx: 0x…\n- new APY: 7.4%",
+)
+```
+
+Both POST to `/api/v1/opencode/notify/` on vault-backend with your `WAYFINDER_API_KEY`. Limits: title ≤ 200 chars, message ≤ 20 000 chars.
+
 ## Project Overview
 
 Wayfinder Paths is a Python 3.12 public SDK for community-contributed DeFi trading strategies and adapters. It provides the building blocks for automated trading: adapters (exchange/protocol integrations), strategies (trading algorithms), and clients (low-level API wrappers). In production it can be integrated with a separate execution service for hosted signing/execution.
