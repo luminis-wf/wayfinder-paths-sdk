@@ -160,7 +160,10 @@ Alpha Lab is a **scored alpha insight feed** that surfaces actionable DeFi signa
 - `wayfinder://delta-lab/assets/{asset_id}` - Asset metadata by ID
 - `wayfinder://delta-lab/assets/by-address/{ADDRESS}` - Assets by contract address
 - `wayfinder://delta-lab/{SYMBOL}/basis` - Basis group membership
-- `wayfinder://delta-lab/{SYMBOL}/timeseries/{SERIES}/{LOOKBACK}/{LIMIT}` - Historical data (snapshots only)
+- `wayfinder://delta-lab/{SYMBOL}/timeseries/{SERIES}/{LOOKBACK}/{LIMIT}` - Timeseries for exact asset (no basis expansion)
+- `wayfinder://delta-lab/{SYMBOL}/timeseries/{SERIES}/{LOOKBACK}/{LIMIT}/{VENUE}` - Timeseries filtered by venue
+- `wayfinder://delta-lab/basis/{SYMBOL}/timeseries/{SERIES}/{LOOKBACK}/{LIMIT}` - Timeseries expanded to basis group (USDC → USDC+sUSDC+aUSDC...)
+- `wayfinder://delta-lab/basis/{SYMBOL}/timeseries/{SERIES}/{LOOKBACK}/{LIMIT}/{VENUE}` - Basis timeseries filtered by venue
 - `wayfinder://delta-lab/screen/price/{SORT}/{LIMIT}/{BASIS}` - Screen assets by price features
 - `wayfinder://delta-lab/screen/lending/{SORT}/{LIMIT}/{BASIS}` - Screen lending markets
 - `wayfinder://delta-lab/screen/perp/{SORT}/{LIMIT}/{BASIS}` - Screen perp markets
@@ -475,8 +478,7 @@ When a user wants a **repeatable/automated system** (recurring jobs):
 Runner CLI (project-local state in `./.wayfinder/runner/`):
 
 ```bash
-poetry run wayfinder runner start --detach   # Start daemon
-poetry run wayfinder runner ensure            # Idempotent start
+poetry run wayfinder runner start             # Start daemon (idempotent)
 poetry run wayfinder runner add-job --name basis-update --type strategy --strategy basis_trading_strategy --action update --interval 600 --config ./config.json
 poetry run wayfinder runner status | run-once | pause | resume | delete <job> | stop
 ```

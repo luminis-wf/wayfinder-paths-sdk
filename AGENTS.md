@@ -6,20 +6,96 @@ This file provides guidance when working with code in this repository.
 
 **IMPORTANT: On every new conversation, check if setup is needed:**
 
-1. Check if `config.json` exists in the repo root
-2. If it does NOT exist, this is a first-time user. You MUST:
-   - Tell the user: "Welcome to Wayfinder Paths! Let me set things up for you."
+1. **Detect Cloud Instance first.** Probe `http://localhost:4096/global/health`. If it returns `{ "healthy": true, ... }`, you are running inside a Cloud instance — the SDK is already installed at `/wf/sdk`, the API key is already in the environment, and remote wallets are managed for you. **Do NOT run `setup.py`, do NOT prompt for an API key, do NOT touch `config.json`** — proceed normally.
+
+2. If `config.json` does NOT exist:
    - Run: `python3 scripts/setup.py`
    - After setup completes, ask the user: "Do you have a Wayfinder API key?"
      - If yes: Add it to `config.json` under `system.api_key`
      - If no: Direct them to **https://strategies.wayfinder.ai** to create an account and get one
 
-3. If `config.json` exists but `system.api_key` is empty/missing:
+3. If `config.json` exists but `system.api_key` is empty/missing AND `WAYFINDER_API_KEY` is not set:
    - Ask: "I see you haven't set up your API key yet. Do you have a Wayfinder API key?"
    - If yes: Help them add it to `config.json` under `system.api_key`
    - If no: Direct them to **https://strategies.wayfinder.ai** to get one
 
 4. If everything is configured, proceed normally
+
+## Wayfinder Cloud Instance Environment Variables
+
+When the SDK runs inside Wayfinder Cloud, two env vars are injected at startup:
+
+| Variable               | What it is                                                                             |
+| ---------------------- | -------------------------------------------------------------------------------------- |
+| `WAYFINDER_API_KEY`    | The user's `wf_…` Wayfinder API key. Picked up automatically by config priority below. |
+| `OPENCODE_INSTANCE_ID` | The Wayfinder Cloud identifier for this runtime. Useful for logs / diagnostics.        |
+
+Config priority: `Constructor parameter > config.json > WAYFINDER_API_KEY env var`.
+
+## Messaging the user (Cloud instances only)
+
+If you detected an OpenCode Cloud instance in "First-Time Setup" (health probe at `http://localhost:4096/global/health` returned `healthy: true`), you may email the owner to report completed work, surface decisions that need them, or flag anything you can't resolve. The backend only delivers when `email_verified` is true on the user, and throttles to **4 emails / user / day** — budget your sends accordingly. The `message` field is rendered as Markdown (headings, lists, code blocks, tables, links) into a themed HTML email, so format it nicely.
+
+**MCP CLI:**
+```
+poetry run python -m wayfinder_paths.mcp.cli notify \
+  --title "Rebalance complete" \
+  --message "Moved **50 USDC** from Aave → Morpho.\n\n- tx: 0x…\n- new APY: 7.4%"
+```
+
+**Python client:**
+```python
+from wayfinder_paths.core.clients import NOTIFY_CLIENT
+
+await NOTIFY_CLIENT.notify(
+    title="Rebalance complete",
+    message="Moved **50 USDC** from Aave → Morpho.\n\n- tx: 0x…\n- new APY: 7.4%",
+)
+```
+
+Both POST to `/api/v1/opencode/notify/` on vault-backend with your `WAYFINDER_API_KEY`. Limits: title ≤ 200 chars, message ≤ 20 000 chars.
+
+## Frontend Context (reading UI state + drawing on charts)
+
+If you detected an OpenCode Cloud instance, you can read what the user is viewing and project overlays (price lines, markers, series) onto their chart in real-time.
+
+**MCP tools:**
+
+| Tool | Args | Description |
+|------|------|-------------|
+| `get_frontend_context` | (none) | Read current chart context + all projections |
+| `add_chart_projection` | `chart_id`, `type`, `config` | Add overlay to a chart |
+| `remove_chart_projection` | `chart_id`, `projection_id` | Remove a specific overlay |
+| `clear_chart_projections` | `chart_id` | Remove all overlays from a chart |
+
+**Typical flow:**
+1. Call `get_frontend_context` → returns `{frontend_context: {chart: {id: "hl-perp-BTC", market_id: "BTC", market_type: "hl-perp", interval: "1m"}}, sdk_projection: {...}}`
+2. Read `chart_id` from `frontend_context.chart.id` → `"hl-perp-BTC"`
+3. Call `add_chart_projection` with `chart_id="hl-perp-BTC"`, `type="horizontal_line"`, `config={"price": 73500, "color": "#ef4444", "label": "Support"}`
+4. Line appears on the user's chart in real-time
+
+**Projection types:**
+
+| type | config |
+|------|--------|
+| `horizontal_line` | `price`, `color?`, `label?` |
+| `marker` | `time` (unix sec), `position` (aboveBar/belowBar), `shape` (circle/arrowUp/arrowDown), `color?`, `label?` |
+| `line_series` | `data: [{time, value}]`, `color?`, `label?`, `line_width?` |
+
+**Python client:**
+```python
+from wayfinder_paths.core.clients import INSTANCE_STATE_CLIENT
+
+state = await INSTANCE_STATE_CLIENT.get_state()
+chart_id = state["frontend_context"]["chart"]["id"]
+
+await INSTANCE_STATE_CLIENT.add_projection(chart_id, {
+    "type": "horizontal_line",
+    "config": {"price": 73500, "color": "#ef4444", "label": "Support"},
+})
+```
+
+Projections are scoped per chart — switching markets shows only that chart's projections. The backend is type-agnostic; new projection types only need a frontend renderer.
 
 ## Project Overview
 
@@ -64,6 +140,7 @@ When answering questions about **rates/APYs/funding**:
 Strategy interface — all strategies implement these actions:
 
 **Read-only actions:**
+
 - `status` - Current positions, balances, and state
 - `analyze` - Run strategy analysis with given deposit amount
 - `snapshot` - Build batch snapshot for scoring
@@ -71,12 +148,14 @@ Strategy interface — all strategies implement these actions:
 - `quote` - Get point-in-time expected APY for the strategy
 
 **Fund-moving actions:**
+
 - `deposit` - Add funds to the strategy (requires `main_token_amount`; optional `gas_token_amount`). First deposit should include `gas_token_amount` (e.g. `0.001`).
 - `update` - Rebalance or execute the strategy logic
 - `withdraw` - **Liquidate**: Close all positions and convert to stablecoins (funds stay in strategy wallet)
 - `exit` - **Transfer**: Move funds from strategy wallet to main wallet (call after withdraw)
 
 **Clarify withdraw vs exit** — these are separate steps:
+
 - `withdraw` closes positions → `exit` transfers to main wallet
 - "withdraw all" / "close everything" → run `withdraw` then `exit`
 - "transfer remaining funds" (positions already closed) → just `exit`
@@ -84,6 +163,7 @@ Strategy interface — all strategies implement these actions:
 **Mypy typing** - When adding or modifying Python code, ensure all _new/changed_ code is fully type-annotated and does not introduce new mypy errors.
 
 Run strategies via CLI:
+
 ```bash
 poetry run python -m wayfinder_paths.run_strategy <strategy_name> --action status --config config.json
 ```
@@ -246,6 +326,7 @@ else:
 ### Key domain knowledge
 
 Hyperliquid minimums:
+
 - **Minimum deposit: $5 USD** (deposits below this are **lost**)
 - **Minimum order: $10 USD notional** (applies to both perp and spot)
 
@@ -266,21 +347,38 @@ Supported chains:
 - **HyperEVM**: Hyperliquid's EVM layer. On-chain tokens (HYPE, USDC) live here; perp/spot trading uses the Hyperliquid L1 (off-chain, not EVM).
 
 Gas requirements (critical — assets get stuck without gas):
+
 - **Before any on-chain operation**, check the wallet has native gas on that chain.
 - If bridging to a new chain for the first time: bridge gas first.
 
 Token identifiers (important for quoting/execution/lookups):
+
 - Use **token IDs** (`<coingecko_id>-<chain_code>`) or **address IDs** (`<chain_code>_<address>`).
 
 ### Recurring automation (Runner)
 
-Runner CLI (project-local state in `./.wayfinder/runner/`):
+**All scheduled/recurring tasks MUST go through the runner daemon.** Do not use cron, systemd timers, or background loops. The daemon handles job persistence, failure tracking, timeouts, and session notifications.
 
 ```bash
-poetry run wayfinder runner start --detach
-poetry run wayfinder runner ensure
-poetry run wayfinder runner add-job --name basis-update --type strategy --strategy basis_trading_strategy --action update --interval 600 --config ./config.json
-poetry run wayfinder runner status | run-once | pause | resume | delete <job> | stop
+poetry run wayfinder runner start                # idempotent — safe to call multiple times
+poetry run wayfinder runner add-job \             # schedule a strategy
+  --name basis-update \
+  --type strategy \
+  --strategy basis_trading_strategy \
+  --action update \
+  --interval 600 \
+  --config ./config.json
+poetry run wayfinder runner add-job \             # schedule a script
+  --name check-balances \
+  --type script \
+  --script-path .wayfinder_runs/check_balances.py \
+  --interval 300
+poetry run wayfinder runner status               # show daemon + all jobs
+poetry run wayfinder runner run-once <job>        # trigger immediate run
+poetry run wayfinder runner pause <job>
+poetry run wayfinder runner resume <job>
+poetry run wayfinder runner delete <job>
+poetry run wayfinder runner stop                  # shut down daemon
 ```
 
 See `RUNNER_ARCHITECTURE.md`.
@@ -345,15 +443,19 @@ Strategy → Adapter → Client(s) → Network/API
 **Always use the scaffolding scripts** when creating new strategies or adapters.
 
 **New strategy:**
+
 ```bash
 just create-strategy "My Strategy Name"
 ```
+
 Creates `wayfinder_paths/strategies/<name>/` with strategy.py, manifest.yaml, test, examples.json, README, and a **dedicated wallet** in `config.json`.
 
 **New adapter:**
+
 ```bash
 just create-adapter "my_protocol"
 ```
+
 Creates `wayfinder_paths/adapters/<name>_adapter/` with adapter.py, manifest.yaml, test, examples.json, README.
 
 ### Manifests
@@ -401,11 +503,41 @@ Strategies extend `wayfinder_paths.core.strategies.Strategy` and must implement:
 - `@pytest.mark.requires_wallets` - Tests needing local wallets configured
 - `@pytest.mark.requires_config` - Tests needing config.json
 
+## Wallets
+
+**On Wayfinder Cloud Instances, ALL wallets MUST be remote. No local wallets — ever.** Remote wallets are managed for you and provide analytics, activity tracking, and session-aware policies. Local wallets are invisible to the rest of the platform and break those guarantees. The `wallets` MCP tool enforces this and will reject local-wallet creation when running on Wayfinder Cloud.
+
+**Always read wallets through the MCP CLI. Never grep `config.json` for `wallets[]` or read wallet files directly.** The MCP wallet resource is the only source of truth — on Wayfinder Cloud the remote wallets are not in `config.json`, so reading the file misses them entirely.
+
+```bash
+# List all wallets (returns remote wallets on Wayfinder Cloud; merged local + remote elsewhere)
+poetry run python -m wayfinder_paths.mcp.cli resource wayfinder://wallets
+
+# Get a single wallet by label (includes profile / tracked protocols)
+poetry run python -m wayfinder_paths.mcp.cli resource wayfinder://wallets/{label}
+
+# Wallet balances (USD-aggregated, per-chain breakdown, spam-filtered)
+poetry run python -m wayfinder_paths.mcp.cli resource wayfinder://balances/{label}
+
+# Recent on-chain activity
+poetry run python -m wayfinder_paths.mcp.cli resource wayfinder://activity/{label}
+```
+
+To create a wallet on a Wayfinder Cloud Instance, always pass `--remote`:
+
+```bash
+poetry run python -m wayfinder_paths.mcp.cli wallets --action create --label main --remote
+```
+
+In Python scripts, prefer the helpers in `wayfinder_paths.mcp.utils` (`load_wallets`, `find_wallet_by_label`) — they hit the same code path as the resource and return remote wallets transparently.
+
 ## Configuration
 
 Config priority: Constructor parameter > config.json > Environment variable (`WAYFINDER_API_KEY`)
 
 Copy `config.example.json` to `config.json` (or run `python3 scripts/setup.py`) for local development.
+
+On a Wayfinder Cloud Instance, the API key comes from the `WAYFINDER_API_KEY` env var and `OPENCODE_INSTANCE_ID` identifies the runtime — see [Wayfinder Cloud environment variables](#wayfinder-cloud-environment-variables).
 
 ## CI/CD Pipeline
 
