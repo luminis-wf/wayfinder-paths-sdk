@@ -103,12 +103,12 @@ async def _fetch_current_data() -> dict:
 
 
 def _emit(title: str, message: str, level: str, metrics: dict) -> None:
-    from wayfinder_paths.packs.client import PacksApiClient
+    from wayfinder_paths.paths.client import PathsApiClient
 
-    client = PacksApiClient()
+    client = PathsApiClient()
     result = client.emit_signal(
         slug=SLUG,
-        pack_version=VERSION,
+        path_version=VERSION,
         title=title,
         message=message,
         level=level,
