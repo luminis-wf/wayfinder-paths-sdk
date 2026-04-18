@@ -52,9 +52,10 @@ Claude asks which mode you want. If you don't know, stick with Safer.
   or talking about an HL trade.
 - A small background checker that the Wayfinder runner invokes every 5
   minutes to trail your open stops.
-- An applet — a demo page where you can move a slider and see how a
-  trailing stop would have handled recent price moves for BTC, HYPE, and
-  three HIP-3 markets, versus a fixed stop.
+- An applet — a demo page that pulls real recent price data from Delta Lab
+  and lets you move a slider to see how a trailing stop would have handled
+  the last day, week, or month for BTC, ETH, SOL, or HYPE versus a fixed
+  stop.
 
 ## Order types supported
 
@@ -85,10 +86,16 @@ same trade. Whichever one fires first automatically cancels the other.
 
 ## Running the demo applet locally
 
-Open `applet/dist/index.html` in a browser. Pick a token, a window, and
-drag the percentage slider to compare a fixed stop with a trailing stop
-on a replayable price path. The math matches the live controller, so the
-results show how the real thing would behave in a similar market.
+When the applet runs inside the Wayfinder Strategies host, it fetches live
+price data from Delta Lab for BTC, ETH, SOL, and HYPE, and re-runs the
+comparison whenever you change the token, window, direction, or
+percentage. The math matches the live controller, so the results show how
+the real thing would behave in a similar market.
+
+Opening `applet/dist/index.html` directly from your file system works
+too, but Delta Lab is cross-origin from a `file://` page — so the applet
+falls back to a clearly-labelled demo price series. To see it with real
+data, serve it behind the Strategies host or a same-origin proxy.
 
 ## Advanced: dedicated strategy wallet
 

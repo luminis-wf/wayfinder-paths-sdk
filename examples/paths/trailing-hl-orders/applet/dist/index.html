@@ -28,6 +28,10 @@
       .slider-row { display: flex; align-items: center; gap: 8px; }
       .slider-val { font-variant-numeric: tabular-nums; min-width: 48px; text-align: right; color: var(--fg); }
       .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+      .status { font-size: 12px; margin: 0 0 8px; padding: 6px 10px; border-radius: 6px; background: #0f1720; color: var(--muted); border: 1px solid var(--border); }
+      .status.ok { color: var(--green); border-color: #1f3a26; background: #0e1a14; }
+      .status.warn { color: #d29922; border-color: #3d2a00; background: #1a1409; }
+      .status.muted { color: var(--muted); }
       .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       .stat { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; }
       .stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -43,7 +47,8 @@
   <body data-path-ready="true">
     <div class="wrap">
       <h1>See how trailing stops would have changed recent trades</h1>
-      <p class="sub">Compare a fixed stop-loss with a trailing stop-loss on real Hyperliquid prices, for a trade taken at the start of the window.</p>
+      <p class="sub">Compare a fixed stop-loss with a trailing stop-loss on live price data from Delta Lab, for a trade taken at the start of the window.</p>
+      <div class="status muted" id="data-status">Waiting for host API…</div>
 
       <div class="controls">
         <div class="ctrl">
