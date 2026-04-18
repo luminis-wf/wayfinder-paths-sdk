@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>See how trailing stops would have changed recent trades</title>
+    <link rel="icon" href="data:," />
+    <link rel="shortcut icon" href="data:," />
+    <link rel="apple-touch-icon" href="data:," />
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --green: #3fb950;
+        --red: #f85149;
+        --card: #161b22;
+        --border: #30363d;
+      }
+      * { box-sizing: border-box; }
+      html, body { background: var(--bg); color: var(--fg); margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      .wrap { max-width: 920px; margin: 0 auto; padding: 24px 20px 40px; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p.sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+      .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+      .ctrl label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+      select, input[type="range"] { width: 100%; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+      .slider-row { display: flex; align-items: center; gap: 8px; }
+      .slider-val { font-variant-numeric: tabular-nums; min-width: 48px; text-align: right; color: var(--fg); }
+      .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+      .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .stat { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; }
+      .stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+      .stat .val { font-size: 20px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+      .pos { color: var(--green); }
+      .neg { color: var(--red); }
+      canvas { width: 100%; height: 320px; display: block; }
+      .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+      .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+      .callout { font-size: 13px; color: var(--muted); margin-top: 8px; }
+    </style>
+  </head>
+  <body data-path-ready="true">
+    <div class="wrap">
+      <h1>See how trailing stops would have changed recent trades</h1>
+      <p class="sub">Compare a fixed stop-loss with a trailing stop-loss on real Hyperliquid prices, for a trade taken at the start of the window.</p>
+
+      <div class="controls">
+        <div class="ctrl">
+          <label for="coin">Token</label>
+          <select id="coin"></select>
+        </div>
+        <div class="ctrl">
+          <label for="window">How far back to look</label>
+          <select id="window">
+            <option value="1d">Last 24 hours</option>
+            <option value="1w" selected>Last week</option>
+            <option value="1m">Last month</option>
+          </select>
+        </div>
+        <div class="ctrl">
+          <label for="side">Trade direction</label>
+          <select id="side">
+            <option value="long" selected>Long (buy)</option>
+            <option value="short">Short (sell)</option>
+          </select>
+        </div>
+        <div class="ctrl">
+          <label for="offset">How much room to give the price</label>
+          <div class="slider-row">
+            <input id="offset" type="range" min="0.5" max="10" step="0.1" value="3" />
+            <span class="slider-val" id="offset-val">3.0%</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <canvas id="chart"></canvas>
+        <div class="legend">
+          <span><span class="dot" style="background:#58a6ff"></span>Price</span>
+          <span><span class="dot" style="background:#f85149"></span>Fixed stop</span>
+          <span><span class="dot" style="background:#3fb950"></span>Trailing stop</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="summary">
+          <div class="stat"><div class="lbl">Fixed stop outcome</div><div class="val" id="fixed-pnl">—</div></div>
+          <div class="stat"><div class="lbl">Trailing stop outcome</div><div class="val" id="trail-pnl">—</div></div>
+          <div class="stat"><div class="lbl">Difference</div><div class="val" id="delta">—</div></div>
+          <div class="stat"><div class="lbl">Best price reached</div><div class="val" id="peak">—</div></div>
+        </div>
+        <p class="callout" id="commentary">Pick a token and window, then slide the percentage to see how the outcomes diverge.</p>
+      </div>
+    </div>
+    <script src="./assets/app.js"></script>
+  </body>
+</html>
