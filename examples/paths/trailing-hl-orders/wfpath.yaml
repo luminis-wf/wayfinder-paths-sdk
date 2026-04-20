@@ -1,0 +1,37 @@
+schema_version: "0.1"
+
+slug: trailing-hl-orders
+name: Trailing Orders for Hyperliquid
+version: 0.1.0
+summary: "Adds trailing stop-loss, take-profit, and entry orders on top of Hyperliquid. A background checker rides along on your main wallet; no separate strategy wallet needed."
+
+primary_kind: tool
+
+tags:
+  - hyperliquid
+  - trailing
+  - stop-loss
+  - take-profit
+  - risk
+
+components:
+  - id: controller
+    kind: script
+    path: controller.py
+  - id: monitor
+    kind: script
+    path: monitor.py
+  - id: attach
+    kind: script
+    path: attach.py
+
+applet:
+  build_dir: "applet/dist"
+  manifest: "applet/applet.manifest.json"
+
+skill:
+  enabled: true
+  source: generated
+  name: "trailing-hl-orders"
+  description: "Use when the user is placing or discussing a Hyperliquid trade. Offers to add a trailing stop-loss, trailing take-profit, or trailing entry as a percentage. Wires up a background checker on the user's main wallet automatically."
+  instructions: "skill/instructions.md"
