@@ -30,11 +30,29 @@ from state import (  # noqa: E402
 
 
 async def _build_adapter(wallet_label: str) -> Any:
-    # Imported lazily so unit-testing the controller doesn't require the SDK.
+    # HL signs EIP-712 typed-data (not raw transactions), so we can't use the
+    # generic `get_adapter()` helper — it wires the tx-signing callback and
+    # every order fails with "Transaction must include these fields". Mirror
+    # the wiring used by `mcp/tools/hyperliquid.py` instead.
     from wayfinder_paths.adapters.hyperliquid_adapter.adapter import HyperliquidAdapter
-    from wayfinder_paths.mcp.scripting import get_adapter
+    from wayfinder_paths.core.config import CONFIG
+    from wayfinder_paths.core.utils.wallets import (
+        get_wallet_sign_typed_data_callback,
+    )
 
-    return await get_adapter(HyperliquidAdapter, wallet_label)
+    sign_cb, address = await get_wallet_sign_typed_data_callback(wallet_label)
+
+    strategy_raw = CONFIG.get("strategy")
+    strategy_cfg = strategy_raw if isinstance(strategy_raw, dict) else {}
+    adapter_config: dict[str, Any] = dict(strategy_cfg)
+    adapter_config["main_wallet"] = {"address": address}
+    adapter_config["strategy_wallet"] = {"address": address}
+
+    return HyperliquidAdapter(
+        config=adapter_config,
+        sign_callback=sign_cb,
+        wallet_address=address,
+    )
 
 
 async def _position_size(adapter: Any, address: str, coin: str) -> float | None:

@@ -8,12 +8,27 @@ natively support.
 
 ## When to prompt
 
-After quoting the user's intended trade and **before** confirming
-`mcp__wayfinder__hyperliquid_execute`, ask:
+**Timing depends on the order type.** A market order fills immediately, and
+any pre-execution prompt adds delay that can cost the user slippage on a
+fast-moving book. A limit order is already non-blocking (it sits on the
+book), so there's no cost to asking first.
 
-> "Want me to attach a trailing stop or take-profit to this trade?"
+- **Market orders (`order_type="market"` or an IOC/market-style fill):**
+  do **not** prompt before `mcp__wayfinder__hyperliquid_execute`. Place the
+  trade first, then — once the fill is confirmed — ask the user:
 
-If the user says yes, collect:
+  > "You're filled on HYPE. Want me to attach a trailing stop, take-profit,
+  > or a trailing limit exit now?"
+
+  Collect the parameters below **after** the fill and proceed to
+  `attach.py`.
+
+- **Limit orders / trailing entries / anything non-immediate:** ask
+  **before** confirming `mcp__wayfinder__hyperliquid_execute`:
+
+  > "Want me to attach a trailing stop or take-profit to this trade?"
+
+In both flows, if the user says yes, collect:
 
 - `sl_pct` — trailing stop-loss offset (e.g. `2` for 2%). Default `2`.
 - `tp_pct` — optional trailing take-profit offset. Ask only if interested.
@@ -30,7 +45,9 @@ For a **trailing entry** (buy after a bottom, sell after a top), collect:
 
 ## After the entry fires
 
-Once the entry `hyperliquid_execute` call returns successfully:
+Both flows converge here: the market order has filled, or the limit order
+was confirmed up-front. Once the entry `hyperliquid_execute` call returns
+successfully:
 
 1. Extract the `cloid` from the response (or synthesize a unique
    `position_id` from `coin + unix-timestamp`).

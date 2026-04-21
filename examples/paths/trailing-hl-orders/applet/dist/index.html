@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>See how trailing stops would have changed recent trades</title>
+    <title>Backtest trailing orders on Hyperliquid</title>
     <link rel="icon" href="data:," />
     <link rel="shortcut icon" href="data:," />
     <link rel="apple-touch-icon" href="data:," />
@@ -14,54 +14,91 @@
         --muted: #8b949e;
         --green: #3fb950;
         --red: #f85149;
+        --yellow: #d29922;
+        --blue: #58a6ff;
         --card: #161b22;
         --border: #30363d;
       }
       * { box-sizing: border-box; }
       html, body { background: var(--bg); color: var(--fg); margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-      .wrap { max-width: 920px; margin: 0 auto; padding: 24px 20px 40px; }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 40px; }
       h1 { font-size: 18px; margin: 0 0 4px; }
       p.sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
       .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
       .ctrl label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
-      select, input[type="range"] { width: 100%; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+      select, input[type="range"], input[type="text"] { width: 100%; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px; }
+      input[type="text"] { text-transform: uppercase; }
+      select {
+        appearance: none;
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        padding-right: 28px;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%238b949e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5 L6 6.5 L11 1.5'/></svg>");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+        cursor: pointer;
+      }
+      select:focus { border-color: var(--blue); outline: none; }
       .slider-row { display: flex; align-items: center; gap: 8px; }
-      .slider-val { font-variant-numeric: tabular-nums; min-width: 48px; text-align: right; color: var(--fg); }
+      .slider-val { font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; color: var(--fg); font-size: 13px; }
+      .ctrl.hidden, .slider-row.hidden { display: none; }
       .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
       .status { font-size: 12px; margin: 0 0 8px; padding: 6px 10px; border-radius: 6px; background: #0f1720; color: var(--muted); border: 1px solid var(--border); }
       .status.ok { color: var(--green); border-color: #1f3a26; background: #0e1a14; }
-      .status.warn { color: #d29922; border-color: #3d2a00; background: #1a1409; }
+      .status.warn { color: var(--yellow); border-color: #3d2a00; background: #1a1409; }
       .status.muted { color: var(--muted); }
       .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       .stat { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; }
       .stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
       .stat .val { font-size: 20px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+      .stat .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+      .stat.hidden { display: none; }
+      .ctrl input[type="number"] { width: 100%; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px; font-variant-numeric: tabular-nums; }
+      .input-prefix { position: relative; }
+      .input-prefix::before { content: "$"; position: absolute; left: 8px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 13px; pointer-events: none; }
+      .input-prefix input { padding-left: 18px !important; }
+      .hint { font-size: 11px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
       .pos { color: var(--green); }
       .neg { color: var(--red); }
-      canvas { width: 100%; height: 320px; display: block; }
-      .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+      canvas { width: 100%; height: 340px; display: block; }
+      .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 6px; }
       .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
-      .callout { font-size: 13px; color: var(--muted); margin-top: 8px; }
+      .dash { display: inline-block; width: 14px; height: 0; border-top: 2px dashed currentColor; margin-right: 5px; vertical-align: middle; opacity: .9; }
+      .callout { font-size: 13px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
     </style>
   </head>
   <body data-path-ready="true">
     <div class="wrap">
-      <h1>See how trailing stops would have changed recent trades</h1>
-      <p class="sub">Compare a fixed stop-loss with a trailing stop-loss on live price data from Delta Lab, for a trade taken at the start of the window.</p>
+      <h1>Backtest trailing orders on Hyperliquid</h1>
+      <p class="sub">Compare a fixed stop-loss with trailing stop-loss, take-profit, or limit-entry orders on live Delta Lab price data, for a trade taken at the start of the window.</p>
+      <p class="sub">Installing this path wires up a Claude skill: for limit orders and trailing entries you'll be prompted <em>before</em> the order is placed; for market orders you'll be prompted <em>after</em> the fill, so the entry isn't delayed.</p>
       <div class="status muted" id="data-status">Waiting for host API…</div>
 
       <div class="controls">
         <div class="ctrl">
-          <label for="coin">Token</label>
-          <select id="coin"></select>
+          <label for="symbol">Hyperliquid symbol</label>
+          <select id="symbol"></select>
         </div>
         <div class="ctrl">
-          <label for="window">How far back to look</label>
+          <label for="kind">Order type</label>
+          <select id="kind">
+            <option value="trailing_sl" selected>Trailing stop-loss</option>
+            <option value="trailing_tp">Trailing take-profit</option>
+            <option value="trailing_entry">Trailing limit entry</option>
+          </select>
+        </div>
+        <div class="ctrl">
+          <label for="window">Lookback window</label>
           <select id="window">
             <option value="1d">Last 24 hours</option>
             <option value="1w" selected>Last week</option>
             <option value="1m">Last month</option>
+            <option value="custom">Custom…</option>
           </select>
+          <div class="slider-row hidden" id="custom-window-wrap" style="margin-top:6px">
+            <input id="custom-window" type="number" step="1" min="1" max="90" value="7" style="flex:1" />
+            <span class="slider-val">days</span>
+          </div>
         </div>
         <div class="ctrl">
           <label for="side">Trade direction</label>
@@ -71,31 +108,43 @@
           </select>
         </div>
         <div class="ctrl">
-          <label for="offset">How much room to give the price</label>
+          <label id="offset-label" for="offset">Primary %</label>
           <div class="slider-row">
-            <input id="offset" type="range" min="0.5" max="10" step="0.1" value="3" />
+            <input id="offset" type="range" min="0.5" max="20" step="0.1" value="3" />
             <span class="slider-val" id="offset-val">3.0%</span>
+          </div>
+          <div class="hint" id="offset-hint"></div>
+        </div>
+        <div class="ctrl" id="activation-wrap">
+          <label id="activation-label" for="activation">If price reverses by</label>
+          <div class="slider-row">
+            <input id="activation" type="range" min="0.5" max="20" step="0.1" value="2" />
+            <span class="slider-val" id="activation-val">2.0%</span>
+          </div>
+          <div class="hint" id="activation-hint"></div>
+        </div>
+        <div class="ctrl">
+          <label for="leverage">Leverage</label>
+          <div class="slider-row">
+            <input id="leverage" type="range" min="1" max="50" step="1" value="1" />
+            <span class="slider-val" id="leverage-val">1×</span>
           </div>
         </div>
       </div>
 
       <div class="card">
         <canvas id="chart"></canvas>
-        <div class="legend">
-          <span><span class="dot" style="background:#58a6ff"></span>Price</span>
-          <span><span class="dot" style="background:#f85149"></span>Fixed stop</span>
-          <span><span class="dot" style="background:#3fb950"></span>Trailing stop</span>
-        </div>
+        <div class="legend" id="legend"></div>
       </div>
 
       <div class="card">
         <div class="summary">
-          <div class="stat"><div class="lbl">Fixed stop outcome</div><div class="val" id="fixed-pnl">—</div></div>
-          <div class="stat"><div class="lbl">Trailing stop outcome</div><div class="val" id="trail-pnl">—</div></div>
-          <div class="stat"><div class="lbl">Difference</div><div class="val" id="delta">—</div></div>
-          <div class="stat"><div class="lbl">Best price reached</div><div class="val" id="peak">—</div></div>
+          <div class="stat" id="fixed-card"><div class="lbl">Fixed-stop $ outcome</div><div class="val" id="fixed-pnl">—</div><div class="sub" id="fixed-sub"></div></div>
+          <div class="stat" id="trail-card"><div class="lbl" id="trail-lbl">Selected order $ outcome</div><div class="val" id="trail-pnl">—</div><div class="sub" id="trail-sub"></div></div>
+          <div class="stat" id="delta-card"><div class="lbl">Difference</div><div class="val" id="delta">—</div><div class="sub" id="delta-sub"></div></div>
+          <div class="stat" id="peak-card"><div class="lbl" id="peak-lbl">Best price reached</div><div class="val" id="peak">—</div><div class="sub" id="peak-sub"></div></div>
         </div>
-        <p class="callout" id="commentary">Pick a token and window, then slide the percentage to see how the outcomes diverge.</p>
+        <p class="callout" id="commentary">Type a Hyperliquid symbol, pick an order type, and slide the percentage to see how the outcomes diverge.</p>
       </div>
     </div>
     <script src="./assets/app.js"></script>
