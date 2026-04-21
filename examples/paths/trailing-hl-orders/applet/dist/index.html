@@ -33,12 +33,19 @@
         -webkit-appearance: none;
         -moz-appearance: none;
         padding-right: 28px;
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%238b949e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5 L6 6.5 L11 1.5'/></svg>");
-        background-repeat: no-repeat;
-        background-position: right 10px center;
         cursor: pointer;
       }
       select:focus { border-color: var(--blue); outline: none; }
+      .ctrl:has(select) { position: relative; }
+      .ctrl:has(select)::after {
+        content: "\25BE";
+        position: absolute;
+        right: 14px;
+        bottom: 10px;
+        color: var(--muted);
+        font-size: 11px;
+        pointer-events: none;
+      }
       .slider-row { display: flex; align-items: center; gap: 8px; }
       .slider-val { font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; color: var(--fg); font-size: 13px; }
       .ctrl.hidden, .slider-row.hidden { display: none; }
