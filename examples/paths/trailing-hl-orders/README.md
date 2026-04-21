@@ -132,7 +132,6 @@ examples/paths/trailing-hl-orders/
 ├── monitor.py         # runs every few minutes; talks to Hyperliquid
 ├── attach.py          # hooks a trailing config onto a fresh trade
 ├── state.py           # atomic JSON storage (survives session restarts)
-├── tests/             # unit tests for the controller logic
 ├── skill/             # what Claude reads + pre-trade nudge
 ├── applet/            # the static backtest demo page
 └── wfpath.yaml        # path manifest
