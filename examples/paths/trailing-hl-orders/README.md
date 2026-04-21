@@ -2,15 +2,26 @@
 
 ## What this does
 
-Hyperliquid lets you set a stop-loss at a fixed price. This path adds
-**trailing** stops (and take-profits) — they follow the price as your trade
-moves in your favor, so you lock in more gains without watching the chart
-all day.
+**Hyperliquid does not natively offer trailing stop-loss, trailing
+take-profit, or trailing limit-entry orders.** This path fills that gap.
+It adds trailing exits that follow the price as your trade moves in your
+favor, so you lock in more gains (or cap adverse entries) without having
+to babysit the chart.
 
 **Example.** You buy HYPE at $30 and set a 5% trailing stop. If HYPE climbs
 to $40, your stop automatically moves up to $38 (5% below the peak). If HYPE
 then drops, the trade closes at $38 — locking in an $8 gain instead of
 getting stopped out at $28.50 like a fixed stop would do.
+
+> ⚠️ **This is a helper, not a live exchange-native trailing order.**
+> The background checker runs on a schedule (default: every 5 minutes). It
+> will **miss price action between run windows**, so sharp wicks or fast
+> moves can blow past your intended trigger before the checker gets a turn.
+> At higher leverage this materially raises your chance of liquidation.
+> Use Safer mode (see below) whenever you can — it parks a live stop order
+> on Hyperliquid itself so the exchange fills it even between ticks. If you
+> need millisecond-accurate trailing, this path is not a substitute for a
+> native exchange feature (which Hyperliquid doesn't currently expose).
 
 ## How to install
 
