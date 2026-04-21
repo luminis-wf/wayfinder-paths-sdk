@@ -6,12 +6,12 @@ from eth_account import Account
 from eth_account.messages import encode_typed_data
 from loguru import logger
 
-from wayfinder_paths.core.clients.OpenCodeClient import OPENCODE_CLIENT
 from wayfinder_paths.core.clients.WalletClient import WALLET_CLIENT
 from wayfinder_paths.core.config import (
     CONFIG,
     get_api_key,
     get_opencode_instance_id,
+    is_opencode_instance,
     load_config_json,
     load_wallet_mnemonic,
     write_wallet_mnemonic,
@@ -36,12 +36,10 @@ def _load_local_wallets() -> list[dict[str, Any]]:
 
 
 async def load_remote_wallets() -> list[dict[str, Any]]:
-    api_key = get_api_key()
-    if not api_key:
+    if not get_api_key() or not is_opencode_instance():
         return []
     try:
-        instance_id = get_opencode_instance_id() if OPENCODE_CLIENT.healthy() else None
-        raw = await WALLET_CLIENT.list_wallets(instance_id=instance_id)
+        raw = await WALLET_CLIENT.list_wallets(instance_id=get_opencode_instance_id())
         wallets = []
         for i, w in enumerate(raw):
             addr = w.get("wallet_address")
@@ -316,7 +314,7 @@ async def create_remote_wallet(
     result = await WALLET_CLIENT.create_wallet(
         chain_type=chain_type, policies=policies, label=label, wallet_type=wallet_type
     )
-    if OPENCODE_CLIENT.healthy():
+    if is_opencode_instance():
         await WALLET_CLIENT.bind_to_instance(
             result["wallet_address"], get_opencode_instance_id()
         )
