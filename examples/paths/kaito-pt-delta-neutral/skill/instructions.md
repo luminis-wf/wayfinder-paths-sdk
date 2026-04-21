@@ -161,21 +161,21 @@ poetry run wayfinder runner ensure
 poetry run wayfinder runner add-job \
   --name kaito-pt-refresh \
   --type script \
-  --script examples/packs/kaito-pt-delta-neutral/scripts/pt_delta_neutral_backtest.py \
-  --args "--symbol KAITO --lookback-days 60 --out examples/packs/kaito-pt-delta-neutral/applet/dist/data/backtest_results.json" \
+  --script examples/paths/kaito-pt-delta-neutral/scripts/pt_delta_neutral_backtest.py \
+  --args "--symbol KAITO --lookback-days 60 --out examples/paths/kaito-pt-delta-neutral/applet/dist/data/backtest_results.json" \
   --interval 43200 \
   --config ./config.json
 ```
 
-This re-generates the applet data with the latest 60-day window twice daily. After each run, republish the pack to push the updated JSON to the host:
+This re-generates the applet data with the latest 60-day window twice daily. After each run, republish the path to push the updated JSON to the host:
 
 ```bash
-poetry run wayfinder pack build --path examples/packs/kaito-pt-delta-neutral --out dist/bundle.zip
+poetry run wayfinder path build --path examples/paths/kaito-pt-delta-neutral --out dist/bundle.zip
 ```
 
 ## Validation
 
 ```bash
-poetry run wayfinder pack fmt --path examples/packs/kaito-pt-delta-neutral
-poetry run wayfinder pack doctor --check --path examples/packs/kaito-pt-delta-neutral
+poetry run wayfinder path fmt --path examples/paths/kaito-pt-delta-neutral
+poetry run wayfinder path doctor --check --path examples/paths/kaito-pt-delta-neutral
 ```

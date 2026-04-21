@@ -33,9 +33,9 @@ poetry run python scripts/pt_delta_neutral_backtest.py \
 - **Liquidity**: PT-sKAITO TVL is ~$183K — large positions face slippage.
 - **Smart contract risk**: Pendle PT and sKAITO staking contracts.
 
-## Pack validation
+## Path validation
 
 ```bash
-poetry run wayfinder pack fmt --path examples/packs/kaito-pt-delta-neutral
-poetry run wayfinder pack doctor --check --path examples/packs/kaito-pt-delta-neutral
+poetry run wayfinder path fmt --path examples/paths/kaito-pt-delta-neutral
+poetry run wayfinder path doctor --check --path examples/paths/kaito-pt-delta-neutral
 ```

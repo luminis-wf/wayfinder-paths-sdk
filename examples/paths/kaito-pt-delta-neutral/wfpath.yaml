@@ -1,7 +1,7 @@
 schema_version: '0.1'
 slug: kaito-pt-delta-neutral
 name: KAITO PT Delta-Neutral Carry
-version: 0.1.8
+version: 0.1.9
 summary: Earn fixed yield on KAITO while hedging price risk. Combines a Pendle PT-sKAITO
   position with a Hyperliquid short to stay market-neutral.
 primary_kind: monitor
