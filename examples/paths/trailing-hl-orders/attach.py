@@ -77,26 +77,43 @@ def _runner(args: list[str]) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def _parse_runner_response(out: str) -> dict:
+    # The `wayfinder runner` CLI exits 0 even on logical failure and reports
+    # success via {"ok": bool, "error"?: str, "result"?: ...} on stdout.
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _runner_failed(code: int, out: str) -> str | None:
+    if code != 0:
+        return f"exit code {code}"
+    parsed = _parse_runner_response(out)
+    if not parsed:
+        return "no JSON response"
+    if parsed.get("ok") is False:
+        return str(parsed.get("error") or "ok=false")
+    return None
+
+
 def _ensure_runner_job(script_path: Path, interval: int) -> str:
     # Idempotent: start the daemon (no-op if already running), add the job if missing.
     code, out, err = _runner(["runner", "start"])
-    if code not in (0,):
-        return f"runner start returned {code}: {err.strip() or out.strip()}"
+    if reason := _runner_failed(code, out):
+        return f"runner start failed: {reason} {err.strip()}".strip()
 
     code, out, err = _runner(["runner", "status"])
-    already_registered = False
-    if code == 0:
-        try:
-            parsed = json.loads(out)
-            jobs = parsed.get("jobs") or parsed.get("result", {}).get("jobs") or []
-            already_registered = any(
-                str(j.get("name")) == RUNNER_JOB_NAME
-                for j in jobs
-                if isinstance(j, dict)
-            )
-        except json.JSONDecodeError:
-            already_registered = RUNNER_JOB_NAME in out
-
+    if reason := _runner_failed(code, out):
+        return f"runner status failed: {reason} {err.strip()}".strip()
+    parsed = _parse_runner_response(out)
+    jobs = (parsed.get("result") or {}).get("jobs") or parsed.get("jobs") or []
+    already_registered = any(
+        str(j.get("name")) == RUNNER_JOB_NAME
+        for j in jobs
+        if isinstance(j, dict)
+    )
     if already_registered:
         return "runner job already registered"
 
@@ -114,8 +131,8 @@ def _ensure_runner_job(script_path: Path, interval: int) -> str:
             str(interval),
         ]
     )
-    if code != 0:
-        return f"add-job failed ({code}): {err.strip() or out.strip()}"
+    if reason := _runner_failed(code, out):
+        return f"add-job failed: {reason}"
     return "runner job registered"
 
 

@@ -3,7 +3,7 @@ schema_version: "0.1"
 slug: trailing-hl-orders
 name: Trailing Orders for Hyperliquid
 version: 0.1.0
-summary: "Adds trailing stop-loss, take-profit, and entry orders on top of Hyperliquid. A background checker rides along on your main wallet; no separate strategy wallet needed."
+summary: "Adds trailing stop-loss, take-profit, and entry orders on top of Hyperliquid. For limit orders and trailing entries, Claude prompts you before placing the trade; for market orders, Claude places the trade first and prompts you afterwards so the entry isn't delayed. A background checker rides along on your main wallet; no separate strategy wallet needed."
 
 primary_kind: tool
 
@@ -33,5 +33,5 @@ skill:
   enabled: true
   source: generated
   name: "trailing-hl-orders"
-  description: "Use when the user is placing or discussing a Hyperliquid trade. Offers to add a trailing stop-loss, trailing take-profit, or trailing entry as a percentage. Wires up a background checker on the user's main wallet automatically."
+  description: "Use when the user is placing or discussing a Hyperliquid trade. Offers to add a trailing stop-loss, trailing take-profit, or trailing entry. For limit orders and trailing entries, prompts BEFORE placement; for market orders, prompts AFTER the fill to avoid delaying the entry. Wires up a background checker on the user's main wallet automatically."
   instructions: "skill/instructions.md"

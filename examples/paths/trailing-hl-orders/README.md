@@ -23,10 +23,19 @@ checker automatically. No files to edit; no settings to paste.
 
 ## How to use it
 
-Next time you ask Claude to place a Hyperliquid trade, it'll ask if you want
-to add a trailing stop or take-profit. Say yes, pick a percentage, and
-you're done. A background checker keeps an eye on the price every few
-minutes and acts for you.
+Next time you ask Claude to place a Hyperliquid trade, it'll offer to add a
+trailing stop, take-profit, or limit-entry exit. **When** it asks depends
+on the order type:
+
+- **Limit orders (and trailing entries):** Claude asks **before** placing
+  the order. A limit order sits on the book anyway, so there's no rush.
+- **Market orders:** Claude places the market order **first**, then asks
+  **after** the fill whether you want to attach a trailing stop, TP, or
+  limit exit. This keeps the entry fast and avoids slippage from extra
+  confirmation round-trips.
+
+Say yes, pick a percentage, and you're done. A background checker keeps an
+eye on the price every few minutes and acts for you.
 
 You can cancel at any time with:
 
