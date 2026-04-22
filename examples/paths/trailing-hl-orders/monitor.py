@@ -156,7 +156,6 @@ async def _place_or_move_resting_trigger(
 ) -> tuple[bool, str | None, int | None, str]:
     coin = cfg_payload["coin"]
     side = cfg_payload["side"]
-    kind = cfg_payload["kind"]
     asset_id = adapter.coin_to_asset.get(coin)
     if asset_id is None:
         return False, existing_cloid, existing_oid, f"Unknown coin {coin!r}"
@@ -183,7 +182,12 @@ async def _place_or_move_resting_trigger(
             cancel_result,
         )
 
-    tpsl = "sl" if kind == "trailing_sl" else "tp"
+    # Both trailing_sl and trailing_tp fire on a PULLBACK from peak, i.e. a
+    # stop-style trigger. HL's tpsl="tp" is a fixed take-profit that fires on
+    # FAVORABLE movement to a threshold — wrong direction for this path. The
+    # trailing_tp's "take-profit" semantics are in the pre-activation gate
+    # (controlled locally); the resting exchange order is always a stop.
+    tpsl = "sl"
     is_buy_to_close = side == "short"
     # HL price rules: max 5 significant digits AND max (6 - szDecimals)
     # decimals for perps (8 - szDecimals for spot). place_market_order rounds

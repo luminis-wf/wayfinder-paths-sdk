@@ -79,6 +79,14 @@
       <h1>Backtest trailing orders on Hyperliquid</h1>
       <p class="sub">Compare a fixed stop-loss with trailing stop-loss, take-profit, or limit-entry orders on live Delta Lab price data, for a trade taken at the start of the window.</p>
       <p class="sub">Installing this path wires up a Claude skill: for limit orders and trailing entries you'll be prompted <em>before</em> the order is placed; for market orders you'll be prompted <em>after</em> the fill, so the entry isn't delayed.</p>
+      <details style="margin: 0 0 20px; font-size: 12px; color: var(--muted);">
+        <summary style="cursor: pointer; color: var(--fg);">How each kind works</summary>
+        <ul style="padding-left: 18px; margin: 8px 0 0;">
+          <li><strong>Trailing stop-loss.</strong> Armed from tick 1. The peak tracks the favorable extreme (high for longs, low for shorts); a pullback of <em>Primary %</em> closes the trade at market.</li>
+          <li><strong>Trailing take-profit.</strong> Dormant until the trade is ahead by <em>Primary %</em> (the activation gate — no order on the exchange yet). Once activated, it arms a resting trigger that trails the peak by <em>If price reverses by</em> — i.e. post-activation it behaves exactly like a trailing SL. Keep the reversal smaller than your SL offset so the TP fires first on tight pullbacks.</li>
+          <li><strong>Trailing limit entry.</strong> No position yet; the peak tracks the adverse extreme. Fires a market entry once price reverses by <em>If price reverses by</em> off that extreme.</li>
+        </ul>
+      </details>
       <div class="status muted" id="data-status">Waiting for host API…</div>
 
       <div class="controls">
@@ -117,16 +125,16 @@
         <div class="ctrl">
           <label id="offset-label" for="offset">Primary %</label>
           <div class="slider-row">
-            <input id="offset" type="range" min="0.5" max="20" step="0.1" value="3" />
-            <span class="slider-val" id="offset-val">3.0%</span>
+            <input id="offset" type="range" min="0.5" max="20" step="0.1" value="5" />
+            <span class="slider-val" id="offset-val">5.0%</span>
           </div>
           <div class="hint" id="offset-hint"></div>
         </div>
         <div class="ctrl" id="activation-wrap">
           <label id="activation-label" for="activation">If price reverses by</label>
           <div class="slider-row">
-            <input id="activation" type="range" min="0.5" max="20" step="0.1" value="2" />
-            <span class="slider-val" id="activation-val">2.0%</span>
+            <input id="activation" type="range" min="0.5" max="20" step="0.1" value="1" />
+            <span class="slider-val" id="activation-val">1.0%</span>
           </div>
           <div class="hint" id="activation-hint"></div>
         </div>

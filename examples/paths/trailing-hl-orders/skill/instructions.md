@@ -30,10 +30,21 @@ book), so there's no cost to asking first.
 
 In both flows, if the user says yes, collect:
 
-- `sl_pct` — trailing stop-loss offset (e.g. `2` for 2%). Default `2`.
-- `tp_pct` — optional trailing take-profit offset. Ask only if interested.
+- `sl_pct` — trailing stop-loss offset (e.g. `5` for 5%). Default `5`.
+  The wider safety net. SL is armed immediately from tick 1 and trails
+  the peak by this offset; a pullback of this size closes the trade.
+- `tp_pct` — trailing take-profit offset. Default `1`. The tighter
+  profit-lock that only engages once the trade is ahead by
+  `activation_pct`. Keep this smaller than `sl_pct` or the TP is
+  redundant — once it activates, both legs share the same peak, so a
+  tighter TP fires first on a pullback and locks profit; the looser SL
+  would otherwise collapse into the same trigger and the two become
+  indistinguishable.
 - `activation_pct` — TP only; how much the trade must move in the user's
-  favor before the TP starts trailing. Default `3`%.
+  favor before the TP starts trailing. Default `5`. No order sits on
+  Hyperliquid during the pre-activation wait — the checker just
+  watches. Once the mid crosses `activation_pct` above entry (for a
+  long), the TP arms and places a resting trigger that trails.
 - `mode` — `resting` (safer: live stop order sits on Hyperliquid) or
   `monitor` (lighter: checker watches and closes). Default `resting`.
 - `cadence_s` — how often the background checker runs. Default `300`.
@@ -42,6 +53,19 @@ For a **trailing entry** (buy after a bottom, sell after a top), collect:
 
 - `entry_pct` — reversal size that triggers entry.
 - `entry_size` — coin units to buy/sell when it fires.
+
+### How each kind behaves (one sentence each)
+
+- **Trailing stop-loss.** Armed immediately. Peak tracks the *favorable*
+  extreme (high for long, low for short); a pullback of `offset_pct`
+  from the peak closes the position at market.
+- **Trailing take-profit.** Dormant until the trade is ahead by
+  `activation_pct`. Once activated, behaves exactly like a trailing SL
+  with `offset_pct` — the "take-profit" semantics live entirely in the
+  activation gate.
+- **Trailing entry.** No position yet; peak tracks the *adverse*
+  extreme. Once price reverses by `offset_pct` off that extreme, a
+  market entry fires.
 
 ## After the entry fires
 

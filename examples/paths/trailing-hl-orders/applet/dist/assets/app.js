@@ -85,8 +85,8 @@ const state = {
   customValue: 7,
   side: "long",
   kind: "trailing_sl",
-  primaryPct: 0.03,   // #offset slider: stop-loss / TP activation / entry arming
-  reversalPct: 0.02,  // #activation slider: trail / retrace / fire reversal
+  primaryPct: 0.05,  // #offset slider: stop-loss / TP activation / entry arming
+  reversalPct: 0.01, // #activation slider: trail / retrace / fire reversal
   leverage: 1,
 };
 

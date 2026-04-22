@@ -79,16 +79,56 @@ Claude asks which mode you want. If you don't know, stick with Safer.
 
 ## Order types supported
 
-- **Trailing stop-loss.** Closes your position after a pullback from the
-  best price it has seen.
-- **Trailing take-profit.** Waits until the trade is already in profit by
-  an amount you choose (the "activation"), then trails like a stop-loss.
-- **Trailing entry.** Doesn't buy yet — watches the price dip first, then
-  buys once it reverses up by your chosen amount. The mirror of that
-  works for shorts.
+All three kinds share one idea: a background checker tracks an *extreme*
+price (the "peak" for longs, the "trough" for shorts) and fires when the
+market reverses off that extreme by a percentage you set.
 
-You can also ask for a trailing stop **and** a trailing take-profit on the
-same trade. Whichever one fires first automatically cancels the other.
+- **Trailing stop-loss.** The safety net. Armed immediately when you
+  attach it. The peak follows the *favorable* direction (up for longs,
+  down for shorts). If price pulls back from the peak by your
+  `sl_pct`, the position closes at market.
+
+  *Example.* HYPE long at $40, SL `sl_pct=5`. Peak climbs to $50,
+  trigger ratchets to $47.50. If HYPE dips to $47.50, you exit there
+  instead of ~$38 like a fixed stop would have done.
+
+- **Trailing take-profit.** The tighter profit-lock. *Dormant* while the
+  trade is flat or losing — the exchange sees no order yet. Once the
+  trade is ahead by `activation_pct`, it arms and then behaves
+  **identically** to a trailing stop-loss with `tp_pct`. The
+  "take-profit" part is only the activation gate; once activated, it is
+  a stop.
+
+  *Example.* HYPE long at $40, TP `tp_pct=1`, `activation_pct=5`.
+  Nothing on the exchange until HYPE reaches $42. Peak then climbs to
+  $50, trigger ratchets to $49.50. If HYPE dips to $49.50, you exit and
+  lock the gain. A looser SL alongside catches anything that moves
+  before the TP ever arms.
+
+  **Keep `tp_pct` smaller than `sl_pct`.** Once the TP activates, both
+  legs trail the same peak. If their offsets match, they sit at the
+  same trigger price and OCO is moot. A tighter TP fires first on a
+  small pullback (locking profit); the looser SL remains as backup for
+  the pre-activation phase.
+
+- **Trailing entry.** You don't have a position yet. The peak tracks
+  the *adverse* extreme (e.g. the lowest dip for a long). Once price
+  reverses by `entry_pct` off that extreme, a market order fires to
+  open the trade. Mirror of that for shorts.
+
+You can attach a trailing stop **and** a trailing take-profit on the
+same trade. Whichever one fires first automatically cancels the other
+(OCO).
+
+### Defaults the skill will use if you don't specify
+
+| Parameter | Default | Why |
+|---|---|---|
+| `sl_pct` | 5% | Wide enough to absorb normal chop, tight enough to protect capital. |
+| `tp_pct` | 1% | Tight pullback to lock profit once the trade is already up. |
+| `activation_pct` | 5% | TP only starts trailing once you're meaningfully in the money. |
+| `mode` | resting | Live stop sits on Hyperliquid — fires even if the checker is down. |
+| `cadence_s` | 300 | Checker tick; drop this if you trade volatile coins with leverage. |
 
 ## What it won't do
 
