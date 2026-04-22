@@ -64,8 +64,48 @@ For a **trailing entry** (buy after a bottom, sell after a top), collect:
   with `offset_pct` — the "take-profit" semantics live entirely in the
   activation gate.
 - **Trailing entry.** No position yet; peak tracks the *adverse*
-  extreme. Once price reverses by `offset_pct` off that extreme, a
-  market entry fires.
+  extreme from the moment you attach. Once price reverses by
+  `offset_pct` off that running extreme, a market entry fires. There
+  is no "wait for N% dip first" gate — the extreme is whatever the
+  market actually prints.
+
+### How to ask for the offset (critical)
+
+A "5% offset" is meaningless without leverage context — at 1x it's a
+small pullback, at 10x it's a -50% margin wipeout. Match Hyperliquid's
+own UI: let the user pick the framing they think in. Use
+`AskUserQuestion` with these three options:
+
+1. **Price move %** — "Close when price pulls back N% from peak."
+   Direct mapping: `offset_pct = answer / 100`.
+2. **ROI % (PnL on margin)** — "Close when unrealized ROI gives back
+   N%." Convert using leverage: `offset_pct = (answer / 100) / leverage`.
+3. **PnL $ (absolute dollars)** — "Close when I've given back $N from
+   peak PnL." Convert using position notional at peak:
+   `offset_pct = dollars / (size_in_coin * peak_price)`. If peak isn't
+   known yet (SL on a fresh entry, or TP pre-activation), use the
+   entry price as the reference — it's a close approximation for small
+   offsets.
+
+Present the three options with examples *filled in using the user's
+actual leverage and position size* so the trade-off is concrete.
+Example for a $20 notional HYPE long at 2x (so $10 margin):
+
+> - **Price %**: "5% drop in HYPE price from peak." (~-10% ROI at 2x)
+> - **ROI %**: "Lose 25% of my margin from peak." (~12.5% price drop at 2x)
+> - **PnL $**: "Give back $2.50 from peak." (~12.5% of $20 notional)
+
+Whichever framing the user picks, convert to `offset_pct` (a price
+fraction, e.g. `0.05` for 5%) before calling `attach.py`. The path
+only speaks price-%.
+
+**`activation_pct`** follows the same pattern, measured from *entry*
+not from peak: price %, ROI %, or PnL $ from entry. Same conversions.
+
+Default values assume the user declined to pick a framing: `sl_pct=5`,
+`tp_pct=1`, `activation_pct=5` — all in price-% terms. Surface both
+the price-% and ROI-% equivalents when you confirm the numbers back to
+the user so they don't get surprised by leverage amplification.
 
 ## After the entry fires
 

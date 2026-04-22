@@ -37,8 +37,14 @@ from state import (  # noqa: E402
 async def _build_adapter(wallet_label: str) -> Any:
     # HL signs EIP-712 typed-data (not raw transactions), so we can't use the
     # generic `get_adapter()` helper — it wires the tx-signing callback and
-    # every order fails with "Transaction must include these fields". Mirror
-    # the wiring used by `mcp/tools/hyperliquid.py` instead.
+    # every order fails with "Transaction must include these fields".
+    #
+    # Since PR #203 split `sign_callback` and `sign_typed_data_callback` on
+    # HyperliquidAdapter, only the latter is read by _sign() for order
+    # broadcast. Pass the typed-data callback into the correct kwarg —
+    # routing it through `sign_callback` (the pre-split behaviour) leaves
+    # `_sign_typed_data_callback` None and every tick raises
+    # "No sign_typed_data_callback configured".
     from wayfinder_paths.adapters.hyperliquid_adapter.adapter import HyperliquidAdapter
     from wayfinder_paths.core.config import CONFIG
     from wayfinder_paths.core.utils.wallets import (
@@ -55,7 +61,7 @@ async def _build_adapter(wallet_label: str) -> Any:
 
     return HyperliquidAdapter(
         config=adapter_config,
-        sign_callback=sign_cb,
+        sign_typed_data_callback=sign_cb,
         wallet_address=address,
     )
 
@@ -309,7 +315,17 @@ async def _tick_for_wallet(
             continue
 
         if decision.action in (Action.INITIALIZE, Action.UPDATE_TRAIL):
-            if cfg.mode == "resting" and decision.trigger_price is not None:
+            # trailing_entry has no resting-order concept on HL — there's no
+            # primitive that opens a new position on a reversal, only
+            # reduce-only triggers. The checker tracks the adverse peak in
+            # state and fires a market order on FIRE_ENTRY. Skip the resting
+            # path regardless of cfg.mode.
+            is_entry_kind = cfg.kind == "trailing_entry"
+            if (
+                not is_entry_kind
+                and cfg.mode == "resting"
+                and decision.trigger_price is not None
+            ):
                 ok, new_cloid, new_oid, note = await _place_or_move_resting_trigger(
                     adapter,
                     payload,

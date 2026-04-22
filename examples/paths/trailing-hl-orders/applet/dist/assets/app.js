@@ -59,9 +59,13 @@ const KIND_META = {
   },
   trailing_entry: {
     label: "Trailing limit entry",
-    primaryLabel: "Order arms after adverse move of",
-    reversalLabel: "If price reverses by",
-    peakLabel: "Reversal trigger from",
+    // No primary slider for entry — the controller doesn't accept a "wait
+    // for N% dip" gate; the peak just tracks the adverse extreme since
+    // attach and fires on reversalPct off it. syncSliderLabels hides the
+    // offset control when kind === "trailing_entry".
+    primaryLabel: null,
+    reversalLabel: "If price reverses by (off the extreme since attach)",
+    peakLabel: "Extreme reached since attach",
     primaryColor: "#d29922",
     primarySubject: "trailing entry",
     fixedLabel: null,
@@ -235,46 +239,42 @@ function simTrailingTP(prices, side, activationPct, retracePct, entry) {
   };
 }
 
-// Trailing entry with activation + reversal. Phase 1 waits for an adverse move
-// of armingPct from entry; Phase 2 tracks the adverse extreme from there and
-// fires once price reverses by reversalPct.
-function simTrailingEntry(prices, side, entry, armingPct, reversalPct) {
-  let armedIndex = null;
+// Trailing entry — matches the live controller exactly: from tick 0, the
+// peak tracks the adverse extreme (low for long, high for short) since
+// attach, and the order fires as soon as price reverses `reversalPct` off
+// that running extreme. There is no configurable "wait for N% dip first"
+// gate; the extreme is whatever the market prints. Keeping the applet
+// honest about that matters — an arming slider would imply behaviour the
+// checker doesn't actually have.
+function simTrailingEntry(prices, side, entry, reversalPct) {
+  let peak = entry;
+  const peakSeries = [entry];
+  const trail = [
+    side === "long" ? entry * (1 + reversalPct) : entry * (1 - reversalPct),
+  ];
   for (let i = 1; i < prices.length; i++) {
-    const adverse = side === "long" ? (entry - prices[i]) / entry : (prices[i] - entry) / entry;
-    if (adverse >= armingPct) { armedIndex = i; break; }
+    peak = side === "long" ? Math.min(peak, prices[i]) : Math.max(peak, prices[i]);
+    const trigger = side === "long" ? peak * (1 + reversalPct) : peak * (1 - reversalPct);
+    peakSeries.push(peak);
+    trail.push(trigger);
+    const crossed = side === "long" ? prices[i] >= trigger : prices[i] <= trigger;
+    if (crossed) {
+      return {
+        kind: "trailing_entry", hit: true, index: i, exit: prices[i],
+        entry, peak, peakSeries, trail,
+      };
+    }
   }
-  if (armedIndex === null) {
-    return {
-      kind: "trailing_entry", hit: false, index: prices.length - 1,
-      exit: prices[prices.length - 1], entry, peak: null, peakSeries: null, trail: null,
-      armedIndex: null, armingPct,
-    };
-  }
-  const post = prices.slice(armedIndex);
-  const sub = trailFromArmed(post, side, reversalPct, "trailing_entry", post[0]);
-  const peakSeries = new Array(prices.length).fill(null);
-  const trail = new Array(prices.length).fill(null);
-  for (let j = 0; j < sub.peakSeries.length; j++) peakSeries[armedIndex + j] = sub.peakSeries[j];
-  for (let j = 0; j < sub.trail.length; j++) trail[armedIndex + j] = sub.trail[j];
   return {
-    kind: "trailing_entry",
-    hit: sub.hit,
-    index: armedIndex + sub.index,
-    exit: sub.exit,
-    entry,
-    peak: sub.peak,
-    peakSeries,
-    trail,
-    armedIndex,
-    armingPct,
+    kind: "trailing_entry", hit: false, index: prices.length - 1,
+    exit: prices[prices.length - 1], entry, peak, peakSeries, trail,
   };
 }
 
 function runSelected(prices, st, entry) {
   if (st.kind === "trailing_sl") return simTrailingSL(prices, st.side, entry, st.primaryPct, st.reversalPct);
   if (st.kind === "trailing_tp") return simTrailingTP(prices, st.side, st.primaryPct, st.reversalPct, entry);
-  if (st.kind === "trailing_entry") return simTrailingEntry(prices, st.side, entry, st.primaryPct, st.reversalPct);
+  if (st.kind === "trailing_entry") return simTrailingEntry(prices, st.side, entry, st.reversalPct);
 }
 
 // --- pnl / formatting -----------------------------------------------------
@@ -700,16 +700,11 @@ function buildCommentary(records, fixed, primary, st, liq) {
     // Both beat liquidation — fall through to normal commentary.
   }
   if (st.kind === "trailing_entry") {
+    const extremeLabel = st.side === "long" ? "low" : "high";
     if (primary.hit) {
-      if (primary.armedIndex !== null) {
-        return `On this window, the order armed after price moved ${fmtPct(st.primaryPct)} against entry, then filled at ${fmtUsd(primary.exit)} once price reversed ${fmtPct(st.reversalPct)} off the ${st.side === "long" ? "low of " : "high of "} ${fmtUsd(primary.peak)}.`;
-      }
-      return `Filled at ${fmtUsd(primary.exit)} after price reversed ${fmtPct(st.reversalPct)} off the ${st.side === "long" ? "low of " : "high of "} ${fmtUsd(primary.peak)}.`;
+      return `Filled at ${fmtUsd(primary.exit)} — price reversed ${fmtPct(st.reversalPct)} off the ${extremeLabel} of ${fmtUsd(primary.peak)} seen since attach.`;
     }
-    if (primary.armedIndex === null) {
-      return `Order never armed — price never moved ${fmtPct(st.primaryPct)} against your entry direction. Lower the activation to see when it would have armed.`;
-    }
-    return `Armed, but price never reversed ${fmtPct(st.reversalPct)} off its ${st.side === "long" ? "low" : "high"} — the limit entry would not have filled.`;
+    return `Order never fired — price never reversed ${fmtPct(st.reversalPct)} off its ${extremeLabel} of ${fmtUsd(primary.peak)} in this window. Tighten the reversal slider to see when it would have filled.`;
   }
   if (st.kind === "trailing_tp" && primary.activatedIndex === null) {
     return `Position never moved ${fmtPct(st.primaryPct)} in your favor, so the trailing TP never armed. Lower the "Start trailing after profit of" slider to see when it would arm.`;
@@ -808,7 +803,20 @@ async function computeAndRender() {
   renderSummary(records, fixed, primary, state, entryPrice, liq);
 }
 
-// Per-kind copy for the two slider hints, showing the dollar implication of each %.
+// Given a price-move pct, describe it in the three framings users think
+// in: price move, ROI on margin, and absolute PnL $ on the applet's
+// $NOTIONAL position. Matches the skill's AskUserQuestion wording so the
+// applet + live prompt speak the same language.
+function pnlEquivalents(pct) {
+  const lev = state.leverage;
+  const roiPct = pct * lev;                 // unrealized ROI = price move × leverage
+  const dollars = pct * NOTIONAL;           // PnL$ on notional (sign-agnostic)
+  return `= ${fmtSignedPct(roiPct)} ROI · ${fmtSignedUsd(dollars)} on $${NOTIONAL.toLocaleString()} @ ${lev}×`;
+}
+
+// Per-kind copy for the two slider hints. Shows both the price-level meaning
+// AND the leverage-aware ROI / $PnL so a 5% pullback at 10× doesn't look
+// innocuous — users get the full cost of the trigger at their leverage.
 function updateSliderHints(entryPrice) {
   const primaryHint = document.getElementById("offset-hint");
   const reversalHint = document.getElementById("activation-hint");
@@ -817,21 +825,23 @@ function updateSliderHints(entryPrice) {
   const rPct = fmtPct(state.reversalPct);
   const pDollar = fmtUsd(entryPrice * state.primaryPct);
   const rDollar = fmtUsd(entryPrice * state.reversalPct);
+  const pEquiv = pnlEquivalents(state.primaryPct);
+  const rEquiv = pnlEquivalents(state.reversalPct);
   if (state.kind === "trailing_sl") {
     const dir = state.side === "long" ? "below" : "above";
     const stopLevel = state.side === "long"
       ? entryPrice * (1 - state.primaryPct)
       : entryPrice * (1 + state.primaryPct);
-    primaryHint.textContent = `Initial stop at ${fmtUsd(stopLevel)} (${pPct} ${dir} ${fmtUsd(entryPrice)} entry).`;
-    reversalHint.textContent = `Once in profit, stop trails the best price by ${rPct} (≈ ${rDollar}). Active stop = tighter of the two.`;
+    primaryHint.textContent = `Initial stop at ${fmtUsd(stopLevel)} (${pPct} ${dir} ${fmtUsd(entryPrice)} entry) ${pEquiv}.`;
+    reversalHint.textContent = `Once in profit, stop trails the best price by ${rPct} (≈ ${rDollar}) ${rEquiv}. Active stop = tighter of the two.`;
   } else if (state.kind === "trailing_tp") {
     const dir = state.side === "long" ? "above" : "below";
-    primaryHint.textContent = `TP arms once the trade is up ${pPct} (≈ ${pDollar} ${dir} entry). Fixed TP also fires at this level.`;
-    reversalHint.textContent = `After arming, closes once price retraces ${rPct} (≈ ${rDollar}) from its peak.`;
+    primaryHint.textContent = `TP arms once the trade is up ${pPct} (≈ ${pDollar} ${dir} entry) ${pEquiv}. Fixed TP also fires at this level.`;
+    reversalHint.textContent = `After arming, closes once price retraces ${rPct} (≈ ${rDollar}) from its peak ${rEquiv}.`;
   } else if (state.kind === "trailing_entry") {
-    const dir = state.side === "long" ? "below" : "above";
-    primaryHint.textContent = `Order starts watching once price moves ${pPct} (≈ ${pDollar} ${dir} entry) against your direction.`;
-    reversalHint.textContent = `Fires once price then reverses ${rPct} (≈ ${rDollar}) off its extreme.`;
+    const extreme = state.side === "long" ? "low" : "high";
+    primaryHint.textContent = "";
+    reversalHint.textContent = `Fires the moment price reverses ${rPct} (≈ ${rDollar}) off the ${extreme} seen since attach ${rEquiv}. No "wait for N% dip" gate — the extreme is just the running min/max.`;
   }
 }
 
@@ -845,7 +855,15 @@ function debouncedCompute() {
 
 function syncSliderLabels() {
   const meta = KIND_META[state.kind];
-  document.getElementById("offset-label").textContent = meta.primaryLabel;
+  const offsetWrap = document.getElementById("offset-wrap");
+  if (meta.primaryLabel) {
+    document.getElementById("offset-label").textContent = meta.primaryLabel;
+    if (offsetWrap) offsetWrap.classList.remove("hidden");
+  } else if (offsetWrap) {
+    // trailing_entry has no primary param — hide the slider entirely so
+    // the UI mirrors the controller's single-knob reality.
+    offsetWrap.classList.add("hidden");
+  }
   document.getElementById("activation-label").textContent = meta.reversalLabel;
 }
 

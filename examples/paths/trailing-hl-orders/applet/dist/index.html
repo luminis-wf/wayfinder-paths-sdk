@@ -84,7 +84,7 @@
         <ul style="padding-left: 18px; margin: 8px 0 0;">
           <li><strong>Trailing stop-loss.</strong> Armed from tick 1. The peak tracks the favorable extreme (high for longs, low for shorts); a pullback of <em>Primary %</em> closes the trade at market.</li>
           <li><strong>Trailing take-profit.</strong> Dormant until the trade is ahead by <em>Primary %</em> (the activation gate — no order on the exchange yet). Once activated, it arms a resting trigger that trails the peak by <em>If price reverses by</em> — i.e. post-activation it behaves exactly like a trailing SL. Keep the reversal smaller than your SL offset so the TP fires first on tight pullbacks.</li>
-          <li><strong>Trailing limit entry.</strong> No position yet; the peak tracks the adverse extreme. Fires a market entry once price reverses by <em>If price reverses by</em> off that extreme.</li>
+          <li><strong>Trailing limit entry.</strong> No position yet. From the moment you attach, the peak tracks the running adverse extreme (lowest mid for a long, highest for a short); the order fires the moment price reverses <em>If price reverses by</em> off that extreme. There is no configurable "wait for N% dip first" gate — the extreme is whatever the market actually prints.</li>
         </ul>
       </details>
       <div class="status muted" id="data-status">Waiting for host API…</div>
@@ -122,7 +122,7 @@
             <option value="short">Short (sell)</option>
           </select>
         </div>
-        <div class="ctrl">
+        <div class="ctrl" id="offset-wrap">
           <label id="offset-label" for="offset">Primary %</label>
           <div class="slider-row">
             <input id="offset" type="range" min="0.5" max="20" step="0.1" value="5" />
