@@ -8,7 +8,6 @@ or hold). Resolves OCO pairs so firing one leg cancels the other.
 from __future__ import annotations
 
 import asyncio
-import shlex
 import shutil
 import subprocess
 import sys
@@ -402,6 +401,13 @@ async def _tick_for_wallet(
             print(f"[trailing-hl] {key}: cancelled")
 
 
+_DELAYED_EXEC_SHIM = (
+    "import os, sys, time\n"
+    "time.sleep(5)\n"
+    "os.execvp(sys.argv[1], sys.argv[1:])\n"
+)
+
+
 def _schedule_runner_self_delete() -> None:
     # Self-cleanup: once every config is gone there's nothing left to monitor,
     # so the job should not keep waking every interval. attach.py re-registers
@@ -410,8 +416,15 @@ def _schedule_runner_self_delete() -> None:
     # The runner daemon refuses to delete a job that is currently running
     # (this one), so we detach a delayed delete that fires after this process
     # exits.
+    #
+    # Subprocess safety: no shell, no string interpolation into a command
+    # line. We spawn a detached Python interpreter running a fixed shim
+    # (_DELAYED_EXEC_SHIM literal above — not built from input) that sleeps
+    # five seconds and then execs the wayfinder CLI with a fixed allowlist
+    # of args. Every element in `delete_cmd` is either shutil.which()
+    # output or a hardcoded literal — nothing from user or config input.
     wf = shutil.which("wayfinder")
-    cmd = [wf] if wf else None
+    cmd: list[str] | None = [wf] if wf else None
     if cmd is None and (poetry := shutil.which("poetry")):
         cmd = [poetry, "run", "wayfinder"]
     if cmd is None:
@@ -419,11 +432,9 @@ def _schedule_runner_self_delete() -> None:
             "[trailing-hl] no configs remaining; wayfinder CLI not on PATH, leaving runner job in place"
         )
         return
-    quoted = " ".join(
-        shlex.quote(s) for s in [*cmd, "runner", "delete", RUNNER_JOB_NAME]
-    )
+    delete_cmd: list[str] = [*cmd, "runner", "delete", RUNNER_JOB_NAME]
     subprocess.Popen(
-        ["bash", "-c", f"sleep 5 && {quoted} >/dev/null 2>&1"],
+        [sys.executable, "-c", _DELAYED_EXEC_SHIM, *delete_cmd],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,

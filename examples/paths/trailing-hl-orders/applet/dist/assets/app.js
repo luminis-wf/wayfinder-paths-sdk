@@ -81,6 +81,13 @@ const MAINTENANCE_MARGIN_RATE = 0.005;
 
 let apiBase = null;
 let apiBaseReady = false;
+// Feature-detection latch: once a Delta Lab fetch fails (404, network
+// error, timeout), we remember that and stop hammering the endpoint on
+// every slider move. The UI shows a single clear "API unavailable"
+// state instead of a stream of failed requests + scary console noise.
+// Cleared only when the user changes symbol or window (explicit retry).
+let apiAvailable = null;  // null = unknown, true = confirmed working, false = known-bad
+let apiUnavailableReason = null;
 let activeRequestToken = 0;
 
 const state = {
@@ -326,6 +333,12 @@ async function fetchWithTimeout(url, ms) {
 
 async function loadLiveSeries(symbol, windowSpec) {
   if (!apiBase) return { ok: false, reason: "no_api_base", records: [] };
+  // Feature-detection latch: if we already confirmed the endpoint is
+  // unavailable this session, skip the fetch entirely. Avoids repeatedly
+  // hitting a 404 and keeps the console clean.
+  if (apiAvailable === false) {
+    return { ok: false, reason: apiUnavailableReason || "unavailable", records: [] };
+  }
   const url = apiBase.replace(/\/$/, "") +
     "/api/v1/delta-lab/public/assets/" + encodeURIComponent(symbol) +
     "/timeseries/?series=price&lookback_days=" + windowSpec.days + "&limit=2000";
@@ -333,11 +346,21 @@ async function loadLiveSeries(symbol, windowSpec) {
     const payload = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
     const records = extractPriceRecords(payload);
     if (records.length < 2) return { ok: false, reason: "no_data", records: [] };
+    apiAvailable = true;
+    apiUnavailableReason = null;
     return { ok: true, records };
   } catch (e) {
-    if (e && e.name === "AbortError") return { ok: false, reason: "timeout", records: [] };
-    if (e && e.status === 404) return { ok: false, reason: "not_found", records: [] };
-    return { ok: false, reason: "fetch_error", records: [] };
+    // Latch: distinguish "endpoint is missing" (404 → probably wrong
+    // host, stays bad) from "this particular symbol/window timed out"
+    // (transient, allow retries). Unknown symbols are transient too.
+    const reason = (e && e.name === "AbortError") ? "timeout"
+      : (e && e.status === 404) ? "not_found"
+      : "fetch_error";
+    if (reason === "not_found" || reason === "fetch_error") {
+      apiAvailable = false;
+      apiUnavailableReason = reason;
+    }
+    return { ok: false, reason, records: [] };
   }
 }
 
@@ -768,9 +791,19 @@ async function computeAndRender() {
     const result = await loadLiveSeries(symbol, windowSpec);
     if (requestToken !== activeRequestToken) return;
     if (!result.ok) {
-      const msg = result.reason === "timeout"
-        ? "Delta Lab took too long for " + symbol + " — try again or pick another window."
-        : "Data unavailable for " + symbol + " — try BTC, ETH, SOL, HYPE, or another listed HL perp.";
+      let msg;
+      if (result.reason === "timeout") {
+        msg = "Delta Lab took too long for " + symbol + " — try again or pick another window.";
+      } else if (result.reason === "not_found" || result.reason === "fetch_error") {
+        // API confirmed unavailable — be explicit about why so the user
+        // isn't left wondering if the slider is broken.
+        msg =
+          "Delta Lab API unavailable at " + apiBase + ". Run this applet via " +
+          "`wayfinder path preview` (proxies Delta Lab) or inside the Wayfinder " +
+          "Strategies host. Pick a different symbol to retry.";
+      } else {
+        msg = "Data unavailable for " + symbol + " — try BTC, ETH, SOL, HYPE, or another listed HL perp.";
+      }
       setStatus(msg, "warn");
       clearChartAndSummary();
       return;
@@ -878,6 +911,10 @@ function init() {
   }
   symbol.addEventListener("change", () => {
     state.symbol = symbol.value;
+    // Explicit retry: changing symbol re-probes the endpoint in case it
+    // came online (or to distinguish "symbol-specific 404" from "API down").
+    apiAvailable = null;
+    apiUnavailableReason = null;
     computeAndRender();
   });
 

@@ -71,6 +71,16 @@ def _runner_cmd() -> list[str] | None:
 
 
 def _runner(args: list[str]) -> tuple[int, str, str]:
+    # Subprocess safety: list form, no shell, no string interpolation.
+    # `cmd` is shutil.which() output for a known executable name
+    # ("wayfinder" or "poetry"), and `args` is supplied only from the
+    # fixed allowlist of calls in _ensure_runner_job below:
+    #   ("runner", "start"), ("runner", "status"),
+    #   ("runner", "add-job", "--name", RUNNER_JOB_NAME, "--type",
+    #    "script", "--script-path", <local-wrapper>, "--interval", <int>)
+    # All values are hardcoded literals or sanitized local paths the
+    # helper itself generated — no user/config-sourced strings reach
+    # the command line.
     cmd = _runner_cmd()
     if cmd is None:
         return 127, "", "wayfinder CLI not found on PATH"
