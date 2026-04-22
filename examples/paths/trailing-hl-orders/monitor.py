@@ -50,7 +50,7 @@ async def _build_adapter(wallet_label: str) -> Any:
 
     return HyperliquidAdapter(
         config=adapter_config,
-        sign_typed_data_callback=sign_cb,
+        sign_callback=sign_cb,
         wallet_address=address,
     )
 
