@@ -185,10 +185,17 @@ async def _place_or_move_resting_trigger(
 
     tpsl = "sl" if kind == "trailing_sl" else "tp"
     is_buy_to_close = side == "short"
+    # HL price rules: max 5 significant digits AND max (6 - szDecimals)
+    # decimals for perps (8 - szDecimals for spot). place_market_order rounds
+    # internally via the same two steps; place_trigger_order does not, so an
+    # unrounded trail like 40.11385 (5 decimals, HYPE allows 4) is rejected
+    # with "Order has invalid price.". Mirror that logic here.
+    price_decimals = adapter._get_price_decimals(asset_id)
+    rounded_trigger = round(float(f"{new_trigger:.5g}"), price_decimals)
     ok, result = await adapter.place_trigger_order(
         asset_id=asset_id,
         is_buy=is_buy_to_close,
-        trigger_price=new_trigger,
+        trigger_price=rounded_trigger,
         size=size,
         address=adapter.wallet_address,
         tpsl=tpsl,
