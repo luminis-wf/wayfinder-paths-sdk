@@ -74,6 +74,28 @@ async def _position_size(adapter: Any, address: str, coin: str) -> float | None:
     return None
 
 
+def _statuses(result: dict[str, Any]) -> list[dict[str, Any]]:
+    data = (result or {}).get("response", {}).get("data", {}) or {}
+    raw = data.get("statuses") or []
+    return [s for s in raw if isinstance(s, dict)]
+
+
+def _per_order_error(result: dict[str, Any]) -> str | None:
+    # HL returns outer status="ok" even when the specific order is rejected;
+    # the real error lives in response.data.statuses[i].error. place_market_order
+    # already does this check internally, but place_trigger_order does not.
+    for s in _statuses(result):
+        if err := s.get("error"):
+            return str(err)
+    return None
+
+
+def _log_hl_result(label: str, result: dict[str, Any]) -> None:
+    statuses = _statuses(result)
+    outer = (result or {}).get("status")
+    print(f"[trailing-hl] {label}: status={outer} statuses={statuses}")
+
+
 async def _execute_close(
     adapter: Any, cfg_payload: dict[str, Any], trigger_price: float
 ) -> tuple[bool, str]:
@@ -98,11 +120,31 @@ async def _execute_close(
             address=adapter.wallet_address,
             reduce_only=True,
         )
+        _log_hl_result(f"{coin} monitor-close place_market_order", result)
         return ok, "market close" if ok else f"market close failed: {result}"
 
-    # Resting mode — the trigger already exists on HL; the cross is just our
-    # local confirmation. Nothing to broadcast here.
-    return True, "resting trigger already armed"
+    # Resting mode — the trigger is supposed to be live on HL. Verify before
+    # trusting it: HL's place_trigger_order endpoint returns outer status="ok"
+    # even when the specific order was rejected (per-order error in statuses[]),
+    # which means we can't assume the stop is armed just because we called the
+    # place method. If the position is still open when our local cross fires,
+    # fall back to a reduce-only market close so the user isn't left naked.
+    size_still_open = await _position_size(adapter, adapter.wallet_address, coin)
+    if not size_still_open or size_still_open <= 0:
+        return True, "resting trigger already armed"
+
+    ok, result = await adapter.place_market_order(
+        asset_id=asset_id,
+        is_buy=is_buy_to_close,
+        slippage=0.01,
+        size=size_still_open,
+        address=adapter.wallet_address,
+        reduce_only=True,
+    )
+    _log_hl_result(f"{coin} resting-fallback place_market_order", result)
+    if ok:
+        return True, "resting trigger did not fire; executed market close"
+    return False, (f"resting trigger did not fire and market close failed: {result}")
 
 
 async def _place_or_move_resting_trigger(
@@ -110,20 +152,35 @@ async def _place_or_move_resting_trigger(
     cfg_payload: dict[str, Any],
     new_trigger: float,
     existing_cloid: str | None,
-) -> tuple[bool, str | None, str]:
+    existing_oid: int | None,
+) -> tuple[bool, str | None, int | None, str]:
     coin = cfg_payload["coin"]
     side = cfg_payload["side"]
     kind = cfg_payload["kind"]
     asset_id = adapter.coin_to_asset.get(coin)
     if asset_id is None:
-        return False, existing_cloid, f"Unknown coin {coin!r}"
+        return False, existing_cloid, existing_oid, f"Unknown coin {coin!r}"
     size = await _position_size(adapter, adapter.wallet_address, coin)
     if not size or size <= 0:
-        return False, existing_cloid, f"No open {coin} position"
+        return False, existing_cloid, existing_oid, f"No open {coin} position"
 
-    if existing_cloid:
-        await adapter.cancel_order_by_cloid(
+    # oid is the canonical handle (HL returns it for trigger orders even when
+    # no cloid was supplied); fall back to cloid-based cancel only if that's
+    # all we have from a legacy state file.
+    if existing_oid is not None:
+        cancel_ok, cancel_result = await adapter.cancel_order(
+            asset_id, existing_oid, adapter.wallet_address
+        )
+        _log_hl_result(
+            f"{coin} cancel_order oid={existing_oid} ok={cancel_ok}", cancel_result
+        )
+    elif existing_cloid:
+        cancel_ok, cancel_result = await adapter.cancel_order_by_cloid(
             asset_id, existing_cloid, adapter.wallet_address
+        )
+        _log_hl_result(
+            f"{coin} cancel_order_by_cloid cloid={existing_cloid} ok={cancel_ok}",
+            cancel_result,
         )
 
     tpsl = "sl" if kind == "trailing_sl" else "tp"
@@ -136,21 +193,46 @@ async def _place_or_move_resting_trigger(
         address=adapter.wallet_address,
         tpsl=tpsl,
     )
-    new_cloid = _extract_cloid(result) if ok else existing_cloid
-    return ok, new_cloid, "ok" if ok else f"place_trigger_order failed: {result}"
+    _log_hl_result(f"{coin} place_trigger_order ok={ok}", result)
+
+    # place_trigger_order only checks the outer status; HL reports per-order
+    # rejections inside response.data.statuses[i].error. Downgrade to failure
+    # when that's present so a rejected stop doesn't look armed.
+    if ok and (err := _per_order_error(result)):
+        return (
+            False,
+            existing_cloid,
+            existing_oid,
+            (f"place_trigger_order rejected by HL: {err}"),
+        )
+    if not ok:
+        return (
+            False,
+            existing_cloid,
+            existing_oid,
+            (f"place_trigger_order failed: {result}"),
+        )
+
+    new_cloid, new_oid = _extract_order_ref(result)
+    return True, new_cloid or existing_cloid, new_oid or existing_oid, "ok"
 
 
-def _extract_cloid(result: dict[str, Any]) -> str | None:
+def _extract_order_ref(result: dict[str, Any]) -> tuple[str | None, int | None]:
+    cloid: str | None = None
+    oid: int | None = None
     try:
-        statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-        for s in statuses:
-            if isinstance(s, dict):
-                resting = s.get("resting") or {}
-                if cloid := resting.get("cloid"):
-                    return str(cloid)
+        for s in _statuses(result):
+            resting = s.get("resting") or s.get("filled") or {}
+            if not cloid and (c := resting.get("cloid")):
+                cloid = str(c)
+            if oid is None and (o := resting.get("oid")) is not None:
+                try:
+                    oid = int(o)
+                except (TypeError, ValueError):
+                    oid = None
     except Exception:
-        return None
-    return None
+        pass
+    return cloid, oid
 
 
 def _cfg_from_payload(payload: dict[str, Any]) -> TrailingConfig:
@@ -217,19 +299,31 @@ async def _tick_for_wallet(
 
         if decision.action in (Action.INITIALIZE, Action.UPDATE_TRAIL):
             if cfg.mode == "resting" and decision.trigger_price is not None:
-                ok, new_cloid, note = await _place_or_move_resting_trigger(
-                    adapter, payload, decision.trigger_price, prior.cloid
+                ok, new_cloid, new_oid, note = await _place_or_move_resting_trigger(
+                    adapter,
+                    payload,
+                    decision.trigger_price,
+                    prior.cloid,
+                    prior.oid,
                 )
-                final_state = TrailingState(
-                    peak=decision.next_state.peak,
-                    activated=decision.next_state.activated,
-                    reference_price=decision.next_state.reference_price,
-                    last_trigger_price=decision.next_state.last_trigger_price,
-                    cloid=new_cloid,
-                    fired=decision.next_state.fired,
-                    cancelled=decision.next_state.cancelled,
-                )
-                set_state(key, final_state)
+                if ok:
+                    final_state = TrailingState(
+                        peak=decision.next_state.peak,
+                        activated=decision.next_state.activated,
+                        reference_price=decision.next_state.reference_price,
+                        last_trigger_price=decision.next_state.last_trigger_price,
+                        cloid=new_cloid,
+                        oid=new_oid,
+                        fired=decision.next_state.fired,
+                        cancelled=decision.next_state.cancelled,
+                    )
+                    set_state(key, final_state)
+                else:
+                    # Don't advance state when the trigger didn't land —
+                    # otherwise a later tick will think the stop is armed
+                    # and FIRE_CLOSE off a phantom order. Next tick will
+                    # see the same peak/mid and retry placement.
+                    pass
                 print(
                     f"[trailing-hl] {key}: {decision.action.value} @ {decision.trigger_price:.6g} ({note})"
                 )
@@ -266,6 +360,7 @@ async def _tick_for_wallet(
                 size=float(size),
                 address=adapter.wallet_address,
             )
+            _log_hl_result(f"{cfg.coin} FIRE_ENTRY place_market_order ok={ok}", result)
             set_state(key, decision.next_state)
             if ok:
                 remove_config(key)
@@ -293,9 +388,13 @@ def _schedule_runner_self_delete() -> None:
     if cmd is None and (poetry := shutil.which("poetry")):
         cmd = [poetry, "run", "wayfinder"]
     if cmd is None:
-        print("[trailing-hl] no configs remaining; wayfinder CLI not on PATH, leaving runner job in place")
+        print(
+            "[trailing-hl] no configs remaining; wayfinder CLI not on PATH, leaving runner job in place"
+        )
         return
-    quoted = " ".join(shlex.quote(s) for s in [*cmd, "runner", "delete", RUNNER_JOB_NAME])
+    quoted = " ".join(
+        shlex.quote(s) for s in [*cmd, "runner", "delete", RUNNER_JOB_NAME]
+    )
     subprocess.Popen(
         ["bash", "-c", f"sleep 5 && {quoted} >/dev/null 2>&1"],
         stdout=subprocess.DEVNULL,
@@ -303,7 +402,9 @@ def _schedule_runner_self_delete() -> None:
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
-    print(f"[trailing-hl] no configs remaining; scheduled runner job '{RUNNER_JOB_NAME}' for deletion")
+    print(
+        f"[trailing-hl] no configs remaining; scheduled runner job '{RUNNER_JOB_NAME}' for deletion"
+    )
 
 
 async def main() -> None:

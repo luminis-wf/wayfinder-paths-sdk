@@ -41,6 +41,7 @@ class TrailingState:
     reference_price: float | None = None  # TP-only entry reference
     last_trigger_price: float | None = None
     cloid: str | None = None
+    oid: int | None = None
     fired: bool = False
     cancelled: bool = False
 
@@ -142,6 +143,7 @@ def step(
                 reference_price=state.reference_price,
                 last_trigger_price=trigger,
                 cloid=state.cloid,
+                oid=state.oid,
             ),
             trigger_price=trigger,
             reason="tp_activated",
@@ -168,6 +170,7 @@ def _initial_or_trail(
                 reference_price=state.reference_price,
                 last_trigger_price=trigger,
                 cloid=state.cloid,
+                oid=state.oid,
             ),
             trigger_price=trigger,
             reason="initialized",
