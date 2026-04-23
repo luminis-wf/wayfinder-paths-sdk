@@ -772,22 +772,23 @@ async function computeAndRender() {
   }
 
   const requestToken = ++activeRequestToken;
-  if (!apiBaseReady) {
-    setStatus("Waiting for host API…", "muted");
-    clearChartAndSummary();
-    return;
-  }
-
-  setStatus("Loading " + symbol + " price data from Delta Lab…", "muted");
   renderLegend(state.kind);
-
   const windowSpec = resolveWindow(state);
   let records;
-  if (apiBase === null) {
-    // file:// fallback only
+
+  // Two-phase render: render synthetic immediately so the chart is never
+  // empty while the host bridge hands us `apiBase`. When (if) the bridge
+  // resolves, `init()`'s listener re-calls computeAndRender and we drop
+  // into the live branch below.
+  if (!apiBaseReady) {
+    records = syntheticSeries(symbol, windowSpec);
+    setStatus("Preview with synthetic data — waiting for host API to load live " + symbol + "…", "muted");
+  } else if (apiBase === null) {
+    // file:// fallback only — host bridge resolved "no API available".
     records = syntheticSeries(symbol, windowSpec);
     setStatus("No API reachable — showing synthetic demo data for " + symbol, "warn");
   } else {
+    setStatus("Loading " + symbol + " price data from Delta Lab…", "muted");
     const result = await loadLiveSeries(symbol, windowSpec);
     if (requestToken !== activeRequestToken) return;
     if (!result.ok) {
@@ -1028,8 +1029,10 @@ function init() {
   syncSliderLabels();
   syncCardVisibility(state.kind);
   renderLegend(state.kind);
-  setStatus("Waiting for host API…", "muted");
-  clearChartAndSummary();
+  // Render synthetic preview immediately so the chart is populated while the
+  // host bridge (if any) fires. The listener above re-calls computeAndRender
+  // when `wf:state`/`wf:hello` arrives, swapping synthetic for live data.
+  computeAndRender();
 }
 
 if (document.readyState === "loading") {

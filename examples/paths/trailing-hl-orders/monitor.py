@@ -8,11 +8,12 @@ or hold). Resolves OCO pairs so firing one leg cancels the other.
 from __future__ import annotations
 
 import asyncio
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from wayfinder_paths.runner.client import RunnerControlClient
+from wayfinder_paths.runner.paths import get_runner_paths
 
 RUNNER_JOB_NAME = "trailing-hl-monitor"
 
@@ -401,55 +402,30 @@ async def _tick_for_wallet(
             print(f"[trailing-hl] {key}: cancelled")
 
 
-_DELAYED_EXEC_SHIM = (
-    "import os, sys, time\n"
-    "time.sleep(5)\n"
-    "os.execvp(sys.argv[1], sys.argv[1:])\n"
-)
-
-
-def _schedule_runner_self_delete() -> None:
-    # Self-cleanup: once every config is gone there's nothing left to monitor,
-    # so the job should not keep waking every interval. attach.py re-registers
-    # it the next time a position is attached.
-    #
-    # The runner daemon refuses to delete a job that is currently running
-    # (this one), so we detach a delayed delete that fires after this process
-    # exits.
-    #
-    # Subprocess safety: no shell, no string interpolation into a command
-    # line. We spawn a detached Python interpreter running a fixed shim
-    # (_DELAYED_EXEC_SHIM literal above — not built from input) that sleeps
-    # five seconds and then execs the wayfinder CLI with a fixed allowlist
-    # of args. Every element in `delete_cmd` is either shutil.which()
-    # output or a hardcoded literal — nothing from user or config input.
-    wf = shutil.which("wayfinder")
-    cmd: list[str] | None = [wf] if wf else None
-    if cmd is None and (poetry := shutil.which("poetry")):
-        cmd = [poetry, "run", "wayfinder"]
-    if cmd is None:
+def _pause_runner_self() -> None:
+    # Self-cleanup without spawning a process: ask the runner daemon to PAUSE
+    # this job via the local Unix socket. Pausing is accepted while the job
+    # is running (unlike delete, which the daemon refuses). Paused jobs stop
+    # ticking immediately after the current run finishes; attach.py resumes
+    # or re-registers the job the next time a position is attached.
+    paths = get_runner_paths()
+    client = RunnerControlClient(sock_path=paths.sock_path)
+    resp = client.call("pause_job", {"name": RUNNER_JOB_NAME})
+    if resp.get("ok"):
         print(
-            "[trailing-hl] no configs remaining; wayfinder CLI not on PATH, leaving runner job in place"
+            f"[trailing-hl] no configs remaining; paused runner job '{RUNNER_JOB_NAME}'"
         )
-        return
-    delete_cmd: list[str] = [*cmd, "runner", "delete", RUNNER_JOB_NAME]
-    subprocess.Popen(
-        [sys.executable, "-c", _DELAYED_EXEC_SHIM, *delete_cmd],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    print(
-        f"[trailing-hl] no configs remaining; scheduled runner job '{RUNNER_JOB_NAME}' for deletion"
-    )
+    else:
+        print(
+            f"[trailing-hl] no configs remaining; pause_job failed: {resp.get('error')!r}"
+        )
 
 
 async def main() -> None:
     configs = load_configs()
     if not configs:
         print("[trailing-hl] no active configs")
-        _schedule_runner_self_delete()
+        _pause_runner_self()
         return
 
     by_wallet: dict[str, list[tuple[str, dict[str, Any]]]] = {}
@@ -464,7 +440,7 @@ async def main() -> None:
             print(f"[trailing-hl] wallet={wallet_label}: tick failed: {exc!r}")
 
     if not load_configs():
-        _schedule_runner_self_delete()
+        _pause_runner_self()
 
 
 if __name__ == "__main__":

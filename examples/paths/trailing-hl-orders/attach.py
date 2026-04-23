@@ -10,15 +10,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from controller import TrailingConfig  # noqa: E402
 from state import add_config  # noqa: E402
+
+from wayfinder_paths.runner.client import RunnerControlClient  # noqa: E402
+from wayfinder_paths.runner.constants import JOB_TYPE_SCRIPT  # noqa: E402
+from wayfinder_paths.runner.lifecycle import ensure_daemon_started  # noqa: E402
+from wayfinder_paths.runner.paths import get_runner_paths  # noqa: E402
 
 RUNNER_JOB_NAME = "trailing-hl-monitor"
 DEFAULT_INTERVAL = 300  # seconds
@@ -60,91 +64,79 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _runner_cmd() -> list[str] | None:
-    wf = shutil.which("wayfinder")
-    if wf:
-        return [wf]
-    poetry = shutil.which("poetry")
-    if poetry:
-        return [poetry, "run", "wayfinder"]
-    return None
+# ---------- runner control (pure Python; no subprocess) --------------------
+#
+# All runner interaction goes through RunnerControlClient, which speaks JSON
+# over a local Unix socket. No shell, no argv construction, no user- or
+# config-sourced strings ever reach a process command line. ensure_daemon_started
+# handles the one-time daemon fork internally (core SDK code, not this path).
 
 
-def _runner(args: list[str]) -> tuple[int, str, str]:
-    # Subprocess safety: list form, no shell, no string interpolation.
-    # `cmd` is shutil.which() output for a known executable name
-    # ("wayfinder" or "poetry"), and `args` is supplied only from the
-    # fixed allowlist of calls in _ensure_runner_job below:
-    #   ("runner", "start"), ("runner", "status"),
-    #   ("runner", "add-job", "--name", RUNNER_JOB_NAME, "--type",
-    #    "script", "--script-path", <local-wrapper>, "--interval", <int>)
-    # All values are hardcoded literals or sanitized local paths the
-    # helper itself generated — no user/config-sourced strings reach
-    # the command line.
-    cmd = _runner_cmd()
-    if cmd is None:
-        return 127, "", "wayfinder CLI not found on PATH"
-    proc = subprocess.run([*cmd, *args], capture_output=True, text=True, check=False)
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-def _parse_runner_response(out: str) -> dict:
-    # The `wayfinder runner` CLI exits 0 even on logical failure and reports
-    # success via {"ok": bool, "error"?: str, "result"?: ...} on stdout.
-    try:
-        parsed = json.loads(out)
-    except json.JSONDecodeError:
+def _status(client: RunnerControlClient) -> dict[str, Any]:
+    resp = client.call("status")
+    if not resp.get("ok"):
         return {}
-    return parsed if isinstance(parsed, dict) else {}
+    result = resp.get("result")
+    return result if isinstance(result, dict) else {}
 
 
-def _runner_failed(code: int, out: str) -> str | None:
-    if code != 0:
-        return f"exit code {code}"
-    parsed = _parse_runner_response(out)
-    if not parsed:
-        return "no JSON response"
-    if parsed.get("ok") is False:
-        return str(parsed.get("error") or "ok=false")
+def _find_job(status: dict[str, Any], name: str) -> dict[str, Any] | None:
+    jobs = status.get("jobs") or []
+    for job in jobs:
+        if isinstance(job, dict) and str(job.get("name")) == name:
+            return job
     return None
+
+
+def _job_status(job: dict[str, Any]) -> str:
+    state = job.get("state")
+    if isinstance(state, dict):
+        return str(state.get("status") or "")
+    return str(job.get("status") or "")
 
 
 def _ensure_runner_job(script_path: Path, interval: int) -> str:
-    # Idempotent: start the daemon (no-op if already running), add the job if missing.
-    code, out, err = _runner(["runner", "start"])
-    if reason := _runner_failed(code, out):
-        return f"runner start failed: {reason} {err.strip()}".strip()
-
-    code, out, err = _runner(["runner", "status"])
-    if reason := _runner_failed(code, out):
-        return f"runner status failed: {reason} {err.strip()}".strip()
-    parsed = _parse_runner_response(out)
-    jobs = (parsed.get("result") or {}).get("jobs") or parsed.get("jobs") or []
-    already_registered = any(
-        str(j.get("name")) == RUNNER_JOB_NAME
-        for j in jobs
-        if isinstance(j, dict)
+    # Idempotent: start the daemon, ensure the job is registered and ACTIVE.
+    paths = get_runner_paths()
+    started_ok, start_info = ensure_daemon_started(
+        paths=paths,
+        tick_seconds=1.0,
+        max_workers=4,
+        max_failures=5,
+        default_timeout_seconds=20 * 60,
+        log_level="INFO",
     )
-    if already_registered:
-        return "runner job already registered"
+    if not started_ok:
+        return f"runner start failed: {start_info}"
 
-    code, out, err = _runner(
-        [
-            "runner",
-            "add-job",
-            "--name",
-            RUNNER_JOB_NAME,
-            "--type",
-            "script",
-            "--script-path",
-            str(script_path),
-            "--interval",
-            str(interval),
-        ]
-    )
-    if reason := _runner_failed(code, out):
-        return f"add-job failed: {reason}"
-    return "runner job registered"
+    client = RunnerControlClient(sock_path=paths.sock_path)
+    status = _status(client)
+    if not status:
+        return "runner status failed: no response"
+
+    existing = _find_job(status, RUNNER_JOB_NAME)
+    if existing is None:
+        resp = client.call(
+            "add_job",
+            {
+                "name": RUNNER_JOB_NAME,
+                "type": JOB_TYPE_SCRIPT,
+                "payload": {"script_path": str(script_path)},
+                "interval_seconds": int(interval),
+            },
+        )
+        if not resp.get("ok"):
+            return f"add_job failed: {resp.get('error')!r}"
+        return "runner job registered"
+
+    # Job already exists. If the previous monitor paused itself when configs
+    # emptied, resume it so the new config we just wrote actually ticks.
+    if _job_status(existing).upper() == "PAUSED":
+        resp = client.call("resume_job", {"name": RUNNER_JOB_NAME})
+        if not resp.get("ok"):
+            return f"resume_job failed: {resp.get('error')!r}"
+        return "runner job resumed"
+    return "runner job already registered"
 
 
 def _stage_runner_wrapper(skill_path_dir: Path) -> Path:
