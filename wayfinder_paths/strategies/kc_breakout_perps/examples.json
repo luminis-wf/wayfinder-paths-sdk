@@ -1,0 +1,52 @@
+{
+  "strategy": "kc_breakout_perps",
+  "description": "Test fixture for the KC-breakout + Ulcer + EMA-trend strategy (HYPE, ZEC, long-only).",
+  "smoke": {
+    "deposit": { "main_token_amount": 50, "gas_token_amount": 0.0 },
+    "update": {},
+    "status": {},
+    "withdraw": {}
+  },
+  "data": {
+    "symbols": ["HYPE", "ZEC"],
+    "interval": "1h",
+    "lookback_days": 60,
+    "source": "hyperliquid"
+  },
+  "params": {
+    "symbols": ["HYPE", "ZEC"],
+    "kc_window": 10,
+    "kc_window_atr": 27,
+    "kc_multiplier": 1.7536,
+    "ulcer_window": 39,
+    "ulcer_threshold": 6.1425,
+    "trend_filter": "ema_above_rising",
+    "trend_window": 100,
+    "trend_slope_lookback": 24,
+    "atr_period": 14,
+    "atr_volatility_factor": 2.0,
+    "reward_factor": 2.59,
+    "max_risk_per_trade": 0.0397,
+    "cooldown_bars": 24,
+    "max_hold_bars": 1000,
+    "exit_execution": "next_open",
+    "max_leverage": 5.0,
+    "max_gross_leverage": 5.0,
+    "rebalance_threshold": 0.05,
+    "min_order_usd": 10.0,
+    "fee_bps": 9.5,
+    "slippage_bps": 5.0,
+    "include_funding": true,
+    "signal_lookback_bars": 1200
+  },
+  "expected_signal_invariants": {
+    "weights_non_negative": true,
+    "max_per_symbol_leverage": 5.0
+  },
+  "expected_backtest_ranges": {
+    "comment": "Per-sleeve full-history ranges from the authoritative engine (strategy_engine.py). Wide bands tolerate the trailing data window shifting day to day.",
+    "hype_total_return_min": 0.20,
+    "zec_total_return_min": 0.20,
+    "portfolio_sharpe_min": 1.2
+  }
+}

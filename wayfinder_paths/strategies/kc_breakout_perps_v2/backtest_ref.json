@@ -1,0 +1,102 @@
+{
+  "schema_version": "0.1",
+  "produced": {
+    "at": "2026-06-22T02:19:42.658485+00:00",
+    "skill": "kc_breakout_perps_v2 high-conviction: HYPE+ZEC long-only KC-breakout(2.0)+Ulcer+EMA-trend, ATR stop / 3.0x TP, next-open exits",
+    "git_sha": "",
+    "ref_hash": "567032ea0797e0f4509c5ac9655f272af553b27773043ecde710e90e275e72d6"
+  },
+  "code": {
+    "signal": {
+      "module": "wayfinder_paths.strategies.kc_breakout_perps_v2.signal",
+      "entrypoint": "compute_signal",
+      "source_sha256": "2974e0e6fa134b24e632bf045eb4139006dfec4dcedcb0b6abd5505a5df52fd0"
+    },
+    "decide": {
+      "module": "wayfinder_paths.strategies.kc_breakout_perps_v2.decide",
+      "entrypoint": "decide",
+      "source_sha256": "a906ce52142e9ff5e18657d6edf88e1ba01606955e1d7e69f45074090bb5b7de"
+    }
+  },
+  "venues": {
+    "perp": true,
+    "hip3": []
+  },
+  "data": {
+    "symbols": [
+      "HYPE",
+      "ZEC"
+    ],
+    "interval": "1h",
+    "window": {
+      "bars": 4921
+    }
+  },
+  "params": {
+    "symbols": [
+      "HYPE",
+      "ZEC"
+    ],
+    "kc_window": 10,
+    "kc_window_atr": 27,
+    "kc_multiplier": 2.0,
+    "ulcer_window": 39,
+    "ulcer_threshold": 6.1425,
+    "trend_filter": "ema_above_rising",
+    "trend_window": 100,
+    "trend_slope_lookback": 24,
+    "atr_period": 14,
+    "atr_volatility_factor": 2.0,
+    "reward_factor": 3.0,
+    "max_risk_per_trade": 0.0397,
+    "cooldown_bars": 24,
+    "max_hold_bars": 1000,
+    "exit_execution": "next_open",
+    "max_leverage": 5.0,
+    "native_stop_orders": true,
+    "native_take_profit": false,
+    "max_gross_leverage": 5.0,
+    "rebalance_threshold": 0.05,
+    "min_order_usd": 10.0,
+    "fee_bps": 9.5,
+    "slippage_bps": 5.0,
+    "include_funding": true,
+    "signal_lookback_bars": 1200
+  },
+  "execution_assumptions": {
+    "fill_model": "next_bar_open",
+    "slippage_bps": 5.0,
+    "fee_bps": 9.5,
+    "min_order_usd": 10.0,
+    "note": "fee_bps = HL taker 4.5 + Wayfinder builder 5.0; slippage per-token (HYPE 4bp, ZEC 5bp)."
+  },
+  "performance": {
+    "sharpe": 4.31,
+    "total_return": 1.0941,
+    "max_drawdown": -0.101,
+    "sharpe_30d": 6.03,
+    "total_return_30d": 0.1191,
+    "max_drawdown_30d": -0.0275,
+    "sharpe_60d": 7.57,
+    "total_return_60d": 0.4469,
+    "max_drawdown_60d": -0.0489,
+    "sharpe_90d": 5.93,
+    "total_return_90d": 0.6184,
+    "max_drawdown_90d": -0.0805,
+    "sharpe_120d": 4.83,
+    "total_return_120d": 0.7192,
+    "max_drawdown_120d": -0.101,
+    "sharpe_180d": 4.71,
+    "total_return_180d": 1.0479,
+    "max_drawdown_180d": -0.101
+  },
+  "monitoring": {
+    "drift_tolerances": {
+      "trigger_timing_ms": 60000,
+      "decision_parity": 0.9,
+      "size_drift_pct": 0.1,
+      "fill_price_drift_bps": 60.0,
+      "fill_completion_pct": 0.9
+    }
+  }
+}

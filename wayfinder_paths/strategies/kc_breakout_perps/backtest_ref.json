@@ -1,0 +1,115 @@
+{
+  "schema_version": "0.1",
+  "produced": {
+    "at": "2026-06-20T00:33:26.686836+00:00",
+    "skill": "kc_breakout_perps initial bond: HYPE+ZEC long-only, KC-breakout + Ulcer + EMA-trend filter, next-open ATR exits, HL+builder costs",
+    "git_sha": "",
+    "ref_hash": "f0bde98565dd59b1dfec8508b67714261f83ca4c4c33837464185c34058cc512"
+  },
+  "code": {
+    "signal": {
+      "module": "wayfinder_paths.strategies.kc_breakout_perps.signal",
+      "entrypoint": "compute_signal",
+      "source_sha256": "1efa952b9fc76ad1059861cc9145c2cb7fec2686a945ba02626c46a38ca67aa6"
+    },
+    "decide": {
+      "module": "wayfinder_paths.strategies.kc_breakout_perps.decide",
+      "entrypoint": "decide",
+      "source_sha256": "a7c54d17dd6afbd8ffc318f6e185677c748a67c9a3715e6222d20f32e91cac8d"
+    }
+  },
+  "venues": {
+    "perp": true,
+    "hip3": []
+  },
+  "data": {
+    "symbols": [
+      "HYPE",
+      "ZEC"
+    ],
+    "interval": "1h",
+    "window": {
+      "start": "2025-11-23",
+      "end": "2026-06-18",
+      "bars": 4953
+    },
+    "fingerprint": "e47b3cbd39593ef437f95f25501d7fc9d0fbccf5a4850c2c1a9ee1dcdc88a2b2"
+  },
+  "params": {
+    "symbols": [
+      "HYPE",
+      "ZEC"
+    ],
+    "kc_window": 10,
+    "kc_window_atr": 27,
+    "kc_multiplier": 1.7536,
+    "ulcer_window": 39,
+    "ulcer_threshold": 6.1425,
+    "trend_filter": "ema_above_rising",
+    "trend_window": 100,
+    "trend_slope_lookback": 24,
+    "atr_period": 14,
+    "atr_volatility_factor": 2.0,
+    "reward_factor": 2.59,
+    "max_risk_per_trade": 0.0397,
+    "cooldown_bars": 24,
+    "max_hold_bars": 1000,
+    "exit_execution": "next_open",
+    "max_leverage": 5.0,
+    "max_gross_leverage": 5.0,
+    "rebalance_threshold": 0.05,
+    "min_order_usd": 10.0,
+    "fee_bps": 9.5,
+    "slippage_bps": 5.0,
+    "include_funding": true,
+    "signal_lookback_bars": 1200
+  },
+  "execution_assumptions": {
+    "fill_model": "next_bar_open",
+    "slippage_bps": 5.0,
+    "fee_bps": 9.5,
+    "min_order_usd": 10.0,
+    "sz_decimals": {
+      "HYPE": 2,
+      "ZEC": 2
+    },
+    "note": "fee_bps = HL taker 4.5 + Wayfinder builder 5.0; slippage per-token (HYPE 4bp, ZEC 5bp) from live L2-book measurement."
+  },
+  "performance": {
+    "sharpe": 2.85,
+    "total_return": 0.6571,
+    "max_drawdown": -0.0817,
+    "trade_count": 43,
+    "sharpe_30d": 8.95,
+    "total_return_30d": 0.2355,
+    "max_drawdown_30d": -0.0274,
+    "trade_count_30d": 7,
+    "sharpe_60d": 4.68,
+    "total_return_60d": 0.28,
+    "max_drawdown_60d": -0.0633,
+    "trade_count_60d": 16,
+    "sharpe_90d": 4.45,
+    "total_return_90d": 0.4843,
+    "max_drawdown_90d": -0.0817,
+    "trade_count_90d": 23,
+    "sharpe_120d": 3.76,
+    "total_return_120d": 0.5433,
+    "max_drawdown_120d": -0.0817,
+    "trade_count_120d": 31,
+    "sharpe_180d": 2.87,
+    "total_return_180d": 0.5888,
+    "max_drawdown_180d": -0.0817,
+    "trade_count_180d": 42,
+    "annualized_return": 1.153,
+    "annualized_return_note": "208d return \u00d7 365/208. Gross, pre-compounding; upper bound. Authoritative engine: strategy_engine.py (true ATR + next-open fills)."
+  },
+  "monitoring": {
+    "drift_tolerances": {
+      "trigger_timing_ms": 60000,
+      "decision_parity": 0.9,
+      "size_drift_pct": 0.1,
+      "fill_price_drift_bps": 60.0,
+      "fill_completion_pct": 0.9
+    }
+  }
+}
