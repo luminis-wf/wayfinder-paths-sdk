@@ -356,9 +356,28 @@ class ActivePerpsStrategy(Strategy):
         from wayfinder_paths.adapters.balance_adapter.adapter import (
             BalanceAdapter,  # noqa: PLC0415
         )
+        from wayfinder_paths.core.utils.wallets import (
+            resolve_main_wallet_label,  # noqa: PLC0415
+        )
         from wayfinder_paths.mcp.scripting import get_adapter  # noqa: PLC0415
 
-        return await get_adapter(BalanceAdapter, "main", self._strategy_name())
+        # Resolve labels rather than hardcoding "main": on Shells the main wallet
+        # is "<slug> primary wallet", not "main". The config carries the labels
+        # resolved at construction; fall back to a live lookup, then "main".
+        strat_cfg = self.config.get("strategy_wallet")
+        strat_label = self._strategy_name()
+        if isinstance(strat_cfg, dict) and strat_cfg.get("label"):
+            strat_label = str(strat_cfg["label"])
+
+        main_cfg = self.config.get("main_wallet")
+        main_label: str | None = None
+        if isinstance(main_cfg, dict) and main_cfg.get("label"):
+            main_label = str(main_cfg["label"])
+        if not main_label:
+            main_label = (
+                await resolve_main_wallet_label(exclude_label=strat_label) or "main"
+            )
+        return await get_adapter(BalanceAdapter, main_label, strat_label)
 
     async def _build_hl_adapter(self) -> Any:
         from wayfinder_paths.adapters.hyperliquid_adapter.adapter import (

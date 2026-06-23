@@ -59,6 +59,7 @@ def _patch_load(strategy_class=None, status="active"):
 def _patch_config():
     return patch(
         "wayfinder_paths.mcp.tools.strategies._get_strategy_config",
+        new_callable=AsyncMock,
         return_value=dict(FAKE_CONFIG),
     )
 

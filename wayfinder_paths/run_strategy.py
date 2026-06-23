@@ -23,29 +23,38 @@ from wayfinder_paths.core.strategies.Strategy import Strategy
 from wayfinder_paths.core.utils.gorlami import gorlami_fork
 from wayfinder_paths.core.utils.units import to_erc20_raw, to_wei_eth
 from wayfinder_paths.core.utils.wallets import (
+    find_wallet_by_label,
     get_private_key,
     get_wallet_signing_callback,
+    resolve_strategy_wallets,
+    wallet_durability_issue,
 )
 
 
-def get_strategy_config(
+async def get_strategy_config(
     strategy_name: str,
     *,
     wallet_label: str | None = None,
     main_wallet_label: str | None = None,
 ) -> dict[str, Any]:
     config = dict(CONFIG.get("strategy", {}))
-    wallets = {w["label"]: w for w in CONFIG.get("wallets", [])}
 
-    main_label = str(main_wallet_label).strip() if main_wallet_label else "main"
-    strat_label = str(wallet_label).strip() if wallet_label else strategy_name
+    # Resolve main + strategy wallets from local AND remote (Shells) wallets, so
+    # users never have to hand-add wallet entries to config.json. The main wallet
+    # is resolved by role (see select_main_wallet), not by a hardcoded "main".
+    resolved = await resolve_strategy_wallets(
+        strategy_name,
+        wallet_label=wallet_label,
+        main_wallet_label=main_wallet_label,
+    )
+    if "main_wallet" not in config and resolved["main"]:
+        config["main_wallet"] = dict(resolved["main"])
+    if "strategy_wallet" not in config and resolved["strategy"]:
+        config["strategy_wallet"] = dict(resolved["strategy"])
 
-    if "main_wallet" not in config and main_label in wallets:
-        config["main_wallet"] = {"address": wallets[main_label]["address"]}
-    if "strategy_wallet" not in config and strat_label in wallets:
-        config["strategy_wallet"] = {"address": wallets[strat_label]["address"]}
-
-    by_addr = {w["address"].lower(): w for w in CONFIG.get("wallets", [])}
+    by_addr = {
+        w["address"].lower(): w for w in CONFIG.get("wallets", []) if w.get("address")
+    }
     for key in ("main_wallet", "strategy_wallet"):
         if wallet := config.get(key):
             if entry := by_addr.get(wallet.get("address", "").lower()):
@@ -138,14 +147,42 @@ async def run_strategy(strategy_name: str, action: str = "status", **kw):
 
     wallet_label = kw.pop("wallet_label", None)
     main_wallet_label = kw.pop("main_wallet_label", None)
-    config = get_strategy_config(
+    config = await get_strategy_config(
         strategy_name,
         wallet_label=wallet_label,
         main_wallet_label=main_wallet_label,
     )
 
-    main_cb, _ = await get_wallet_signing_callback(main_wallet_label or "main")
-    strat_cb, _ = await get_wallet_signing_callback(wallet_label or strategy_name)
+    # Build signing callbacks from the RESOLVED wallet labels (which handle the
+    # Shells "<slug> primary wallet" naming). Best-effort: a missing main wallet
+    # must not crash actions that don't need it (update/status/withdraw). Actions
+    # that do need it (deposit/exit) surface a clear error downstream. This
+    # mirrors the MCP entrypoint (mcp/tools/strategies.py).
+    main_label = (config.get("main_wallet") or {}).get("label") or main_wallet_label
+    strat_label = (
+        (config.get("strategy_wallet") or {}).get("label")
+        or wallet_label
+        or strategy_name
+    )
+
+    async def _safe_signing_callback(label: str | None):
+        if not label:
+            return None
+        try:
+            cb, _ = await get_wallet_signing_callback(label)
+            return cb
+        except ValueError:
+            return None
+
+    main_cb = await _safe_signing_callback(main_label)
+    strat_cb = await _safe_signing_callback(strat_label)
+
+    # Warn (don't fail) when a recurring action runs on a short-lived session
+    # wallet — it will sign now but stop signing once the ~1h session expires.
+    if action in ("update", "run"):
+        issue = wallet_durability_issue(await find_wallet_by_label(strat_label))
+        if issue:
+            logger.warning(f"Strategy wallet '{strat_label}' {issue}")
 
     module, _ = load_strategy_module(strategy_name)
     strategy_cls = find_strategy_class(module)

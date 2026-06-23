@@ -24,6 +24,7 @@ StatusTuple = tuple[bool, str]
 
 class WalletConfig(TypedDict, total=False):
     address: str
+    label: str | None
     private_key: str | None
     private_key_hex: str | None
     wallet_type: str | None

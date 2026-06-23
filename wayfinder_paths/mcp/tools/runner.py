@@ -12,6 +12,10 @@ from wayfinder_paths.mcp.utils import (
     read_text_excerpt,
     repo_root,
 )
+from wayfinder_paths.core.utils.wallets import (
+    find_wallet_by_label,
+    wallet_durability_issue,
+)
 from wayfinder_paths.runner.client import RunnerControlClient
 from wayfinder_paths.runner.constants import JOB_TYPE_SCRIPT, JOB_TYPE_STRATEGY
 from wayfinder_paths.runner.lifecycle import ensure_daemon_started, try_status
@@ -374,6 +378,20 @@ async def core_runner(
                     if not strat:
                         return err(
                             "invalid_request", "strategy is required for add_job"
+                        )
+                    # A recurring strategy job must sign on every scheduled run.
+                    # Reject session wallets (~1h TTL) up front so the job doesn't
+                    # silently start failing an hour after it's scheduled.
+                    strat_wallet_label = (
+                        str(wallet_label).strip() if wallet_label else strat
+                    )
+                    issue = wallet_durability_issue(
+                        await find_wallet_by_label(strat_wallet_label)
+                    )
+                    if issue:
+                        return err(
+                            "invalid_wallet",
+                            f"Strategy wallet '{strat_wallet_label}' {issue}",
                         )
                     job_payload.update(
                         {

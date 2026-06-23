@@ -7,7 +7,10 @@ from wayfinder_paths.core.config import CONFIG
 from wayfinder_paths.core.engine.manifest import load_strategy_manifest
 from wayfinder_paths.core.engine.strategy_loader import load_strategy_module
 from wayfinder_paths.core.strategies.Strategy import Strategy
-from wayfinder_paths.core.utils.wallets import get_wallet_signing_callback
+from wayfinder_paths.core.utils.wallets import (
+    get_wallet_signing_callback,
+    resolve_strategy_wallets,
+)
 from wayfinder_paths.mcp.utils import (
     catch_errors,
     err,
@@ -25,16 +28,19 @@ def _load_strategy_class(strategy_name: str) -> tuple[type[Strategy], str]:
     return getattr(module, class_name), manifest.status
 
 
-def _get_strategy_config(strategy_name: str) -> dict[str, Any]:
+async def _get_strategy_config(strategy_name: str) -> dict[str, Any]:
     config = dict(CONFIG.get("strategy", {}))
     if "strategies" in CONFIG:
         config["strategies"] = CONFIG["strategies"]
-    wallets = {w["label"]: w for w in CONFIG.get("wallets", [])}
 
-    if "main_wallet" not in config and "main" in wallets:
-        config["main_wallet"] = {"address": wallets["main"]["address"]}
-    if "strategy_wallet" not in config and strategy_name in wallets:
-        config["strategy_wallet"] = {"address": wallets[strategy_name]["address"]}
+    # Resolve main + strategy wallets from local AND remote (Shells) wallets so
+    # the main wallet works whether it is labelled "main" (local) or
+    # "<slug> primary wallet" (Shells), without hand-editing config.json.
+    resolved = await resolve_strategy_wallets(strategy_name)
+    if "main_wallet" not in config and resolved["main"]:
+        config["main_wallet"] = dict(resolved["main"])
+    if "strategy_wallet" not in config and resolved["strategy"]:
+        config["strategy_wallet"] = dict(resolved["strategy"])
     return config
 
 
@@ -124,14 +130,16 @@ async def core_run_strategy(
             res = await res
         return ok_with_warning({"strategy": strategy, "action": action, "output": res})
 
-    config = _get_strategy_config(strategy)
+    config = await _get_strategy_config(strategy)
 
+    main_label = (config.get("main_wallet") or {}).get("label") or "main"
+    strategy_label = (config.get("strategy_wallet") or {}).get("label") or strategy
     try:
-        main_cb, _ = await get_wallet_signing_callback("main")
+        main_cb, _ = await get_wallet_signing_callback(main_label)
     except ValueError:
         main_cb = None
     try:
-        strategy_cb, _ = await get_wallet_signing_callback(strategy)
+        strategy_cb, _ = await get_wallet_signing_callback(strategy_label)
     except ValueError:
         strategy_cb = None
 

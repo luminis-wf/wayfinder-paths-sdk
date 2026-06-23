@@ -149,7 +149,14 @@ def _from_dict(d: dict[str, Any]) -> BacktestRef:
     # ---- data ----
     data_in = d["data"]
     if "window" in data_in:
-        window = DataWindow(**data_in["window"])
+        # Permissive: accept a bars-only window or start_date/end_date aliases,
+        # and ignore unknown keys (DataWindow(**window) would raise on either).
+        win_in = dict(data_in["window"] or {})
+        window = DataWindow(
+            start=str(win_in.get("start") or win_in.get("start_date") or ""),
+            end=str(win_in.get("end") or win_in.get("end_date") or ""),
+            bars=win_in.get("bars"),
+        )
     else:
         window = DataWindow(
             start=str(data_in.get("start_date") or data_in.get("start") or ""),

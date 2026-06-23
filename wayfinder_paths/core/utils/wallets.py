@@ -89,6 +89,123 @@ async def find_wallet_by_label(label: str) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Resolving the user's "main" / primary wallet
+# ---------------------------------------------------------------------------
+#
+# There is no single label that identifies the user's primary wallet across
+# environments. Locally, `scripts/setup.py` creates one labelled exactly "main".
+# On Wayfinder Shells the primary wallet is server-named with a random slug plus
+# a " primary wallet" suffix (e.g. "vast-running-sage primary wallet"). Framework
+# code must never hardcode "main": use `select_main_wallet` / the async helpers
+# below so both environments resolve correctly.
+
+PRIMARY_WALLET_SUFFIX = "primary wallet"
+
+
+def _wallet_label(wallet: dict[str, Any]) -> str:
+    return str(wallet.get("label", "")).strip()
+
+
+def select_main_wallet(
+    wallets: list[dict[str, Any]],
+    *,
+    preferred: str | None = None,
+    exclude_label: str | None = None,
+) -> dict[str, Any] | None:
+    """Pick the user's main/primary wallet from a wallet list.
+
+    Resolution order:
+      1. Exact match on ``preferred`` label (explicit override — config or CLI).
+      2. A wallet labelled exactly "main" (local-dev convention).
+      3. A wallet whose label ends with "primary wallet" (Shells convention).
+
+    ``exclude_label`` (typically the strategy's own wallet) is never returned by
+    rules 2-3, so a single-strategy setup never picks the strategy wallet as the
+    main wallet. Returns ``None`` when nothing matches.
+    """
+    if preferred and preferred.strip():
+        want = preferred.strip()
+        for w in wallets:
+            if _wallet_label(w) == want:
+                return w
+
+    for w in wallets:
+        label = _wallet_label(w)
+        if label and label != exclude_label and label.lower() == "main":
+            return w
+
+    for w in wallets:
+        label = _wallet_label(w)
+        if (
+            label
+            and label != exclude_label
+            and label.lower().endswith(PRIMARY_WALLET_SUFFIX)
+        ):
+            return w
+
+    return None
+
+
+async def resolve_main_wallet_label(
+    preferred: str | None = None, *, exclude_label: str | None = None
+) -> str | None:
+    """Async — resolve the label of the user's main wallet (local + remote)."""
+    wallet = select_main_wallet(
+        await load_wallets(), preferred=preferred, exclude_label=exclude_label
+    )
+    return _wallet_label(wallet) if wallet else None
+
+
+def _wallet_view(wallet: dict[str, Any] | None) -> dict[str, str] | None:
+    if not wallet or not wallet.get("address"):
+        return None
+    return {"label": _wallet_label(wallet), "address": str(wallet["address"])}
+
+
+async def resolve_strategy_wallets(
+    strategy_name: str,
+    *,
+    wallet_label: str | None = None,
+    main_wallet_label: str | None = None,
+) -> dict[str, dict[str, str] | None]:
+    """Resolve the (main, strategy) wallets for a strategy from local + remote.
+
+    The strategy wallet is matched on ``wallet_label`` (or the strategy name);
+    the main wallet via :func:`select_main_wallet`. Returns
+    ``{"main": {"label", "address"} | None, "strategy": {"label", "address"} | None}``.
+    """
+    wallets = await load_wallets()
+    strat_label = (wallet_label or "").strip() or strategy_name
+
+    strat = next((w for w in wallets if _wallet_label(w) == strat_label), None)
+    main = select_main_wallet(
+        wallets, preferred=main_wallet_label, exclude_label=strat_label
+    )
+    return {"main": _wallet_view(main), "strategy": _wallet_view(strat)}
+
+
+def wallet_durability_issue(wallet: dict[str, Any] | None) -> str | None:
+    """Return a human-readable problem if ``wallet`` is unsuitable for unattended
+    recurring jobs, else ``None``.
+
+    Remote *session* wallets are short-lived (~1h TTL) and stop being able to
+    sign once the session expires — a recurring strategy job on a session wallet
+    succeeds on its first run and then fails every run afterwards. Such jobs need
+    a *strategy* wallet (7-day TTL). Local wallets and remote strategy/policy
+    wallets do not expire, so they return ``None``.
+    """
+    if not wallet or wallet.get("type") != "remote":
+        return None
+    wallet_type = str(wallet.get("wallet_type") or "session").strip().lower()
+    if wallet_type == "session":
+        return (
+            "is a session wallet (~1h TTL); recurring strategy jobs need a "
+            'strategy wallet (7-day TTL). Recreate it with wallet_type="strategy".'
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Signing callbacks (local)
 # ---------------------------------------------------------------------------
 
